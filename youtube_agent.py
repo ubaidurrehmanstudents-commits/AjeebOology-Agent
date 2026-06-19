@@ -113,7 +113,7 @@ PALETTES = [
 # ══════════════════════════════════════════════════════════════
 #  STEP 1 — FETCH FACT (Tavily → Groq → Fallback)
 # ══════════════════════════════════════════════════════════════
-def fetch_fact_tavily() -> str | None:
+def fetch_fact_tavily():
     """Search for a fresh fact using Tavily."""
     if not TAVILY_API_KEY:
         return None
@@ -142,7 +142,7 @@ def fetch_fact_tavily() -> str | None:
         return None
 
 
-def generate_fact_with_groq(raw_context: str | None) -> dict:
+def generate_fact_with_groq(raw_context) -> dict:
     """Use Groq (LLaMA) to generate a structured Hinglish fact."""
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -484,7 +484,9 @@ def build_video(slide_paths: list[Path], audio_clips: list[Path]) -> bool:
     for slide, dur in zip(slide_paths, durations):
         inputs += ["-loop", "1", "-t", str(dur), "-i", str(slide)]
 
-    audio_inputs = ["-i", str(a) for a in audio_clips]
+    audio_inputs = []
+for a in audio_clips:
+    audio_inputs += ["-i", str(a)]
 
     n = len(slide_paths)
 
