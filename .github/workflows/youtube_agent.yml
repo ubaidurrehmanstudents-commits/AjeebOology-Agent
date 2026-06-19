@@ -33,7 +33,7 @@ jobs:
       - name: Install Python Libraries
         run: |
           pip install --upgrade pip --quiet
-          pip install groq tavily-python gTTS Pillow requests
+          pip install groq tavily-python gTTS Pillow requests edge-tts
           echo "Python libraries installed"
 
       - name: Run YouTube Agent Script
