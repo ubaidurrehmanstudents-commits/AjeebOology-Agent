@@ -2,7 +2,7 @@ import os
 import requests
 from groq import Groq
 from gtts import gTTS
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 # 1. API Environment Variables Check
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -48,14 +48,14 @@ for line in response_text.split('\n'):
     elif line.startswith("SCRIPT:"):
         script = line.replace("SCRIPT:", "").strip()
 
-# 3. Generate Audio via gTTS (Hindi accent works perfect for Roman Urdu)
+# 3. Generate Audio via gTTS
 tts = gTTS(text=script, lang='hi', slow=False)
 audio_file = "voice.mp3"
 tts.save(audio_file)
 print("🔊 Voice Over Generated!")
 
 # 4. Generate HD Canvas for Shorts (1080x1920)
-img = Image.new('RGB', (1080, 1920), color=(15, 10, 25)) # Dark Theme
+img = Image.new('RGB', (1080, 1920), color=(15, 10, 25))
 d = ImageDraw.Draw(img)
 
 # Simple sleek border
