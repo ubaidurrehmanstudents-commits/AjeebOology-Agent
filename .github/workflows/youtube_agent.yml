@@ -2,8 +2,8 @@ name: YouTube Shorts Automation Agent
 
 on:
   schedule:
-    - cron: '0 12 * * *'  # Daily 5:00 PM PKT (12:00 PM UTC) par automatic chalega
-  workflow_dispatch:      # Manual chalanay ke liye button mil jayega
+    - cron: '0 12 * * *'  # Daily 5:00 PM PKT
+  workflow_dispatch:      # Manual trigger
 
 jobs:
   build-and-generate:
@@ -34,6 +34,8 @@ jobs:
         TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
       run: python youtube_agent.py
 
     - name: Upload Video Artifact
