@@ -370,7 +370,6 @@ def wrap_text(text, font, max_width):
         lines.append(current)
     return lines
 
-
 def draw_glowing_text(draw, pos, text, font, color, glow_color, glow_range=3):
     x, y = pos
     for dx in range(-glow_range, glow_range + 1):
@@ -379,8 +378,7 @@ def draw_glowing_text(draw, pos, text, font, color, glow_color, glow_range=3):
                 draw.text((x+dx, y+dy), text, font=font, fill=glow_color)
     draw.text((x+2, y+2), text, font=font, fill=(0, 0, 0))
     draw.text((x, y), text, font=font, fill=color)
-
-
+    
 # ══════════════════════════════════════════════════════
 # ANIMATED FRAME CREATION
 # ══════════════════════════════════════════════════════
