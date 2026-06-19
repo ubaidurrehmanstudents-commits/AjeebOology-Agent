@@ -5,11 +5,12 @@ import random
 import logging
 import requests
 import subprocess
+import asyncio
+import math
 from pathlib import Path
 from datetime import datetime
 
 from groq import Groq
-from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
 
 logging.basicConfig(
@@ -27,12 +28,27 @@ GITHUB_RUN_ID    = os.environ.get("GITHUB_RUN_ID", "")
 GITHUB_REPO      = os.environ.get("GITHUB_REPOSITORY", "")
 
 WIDTH, HEIGHT  = 720, 1280
-SLIDE_DURATION = 5
+FPS            = 24
 OUTPUT_VIDEO   = "output_video.mp4"
 THUMBNAIL_FILE = "thumbnail.png"
 FRAMES_DIR     = Path("frames")
 AUDIO_DIR      = Path("audio_clips")
 MUSIC_FILE     = "bg_music.mp3"
+FONT_PATH      = "NotoSans.ttf"
+FONT_BOLD_PATH = "NotoSans-Bold.ttf"
+
+# Brand colors matching Ajeebology logo
+BRAND = {
+    "bg_dark":   (10, 5, 25),
+    "bg_mid":    (20, 10, 45),
+    "purple1":   (120, 60, 220),
+    "purple2":   (160, 80, 255),
+    "cyan":      (80, 200, 255),
+    "white":     (255, 255, 255),
+    "star":      (200, 180, 255),
+    "glow_p":    (100, 40, 180),
+    "glow_c":    (40, 150, 200),
+}
 
 TOPICS = [
     "psychology facts mind blowing",
@@ -46,37 +62,67 @@ TOPICS = [
 
 FALLBACK_FACTS = [
     {
-        "title": "🧠 Psychology Ka Kamaal!",
+        "title": "Dimaag Ka Kamaal",
         "fact": "Jab aap kisi cheez ke baare mein bahut zyada sochte hain toh aapka brain usse reality maan leta hai. Isliye positive sochna scientifically proven hai!",
         "hook": "Yeh sun ke aap hairan ho jayenge...",
         "wrapup": "Aisa hi content ke liye subscribe karein!",
-        "category": "Psychology"
+        "category": "Psychology",
+        "english_title": "Mind Blowing Psychology Fact That Will Shock You",
+        "description": "Amazing psychology fact about how your brain works. Subscribe for daily facts!",
+        "tags": "psychology,facts,brain,mindblowing,shorts,viral,hindi,knowledge,science,amazing"
     },
     {
-        "title": "🌌 Space Ka Raaz!",
-        "fact": "Universe mein itne stars hain ki agar aap ek second mein ek star count karein toh 3000 saal lagenge!",
+        "title": "Space Ka Raaz",
+        "fact": "Universe mein itne stars hain ki agar aap ek second mein ek star count karein toh 3000 saal lagenge! Aur hum sochte hain hum akele hain...",
         "hook": "Space ka yeh secret aapki soch badal dega!",
         "wrapup": "Aisa hi content ke liye subscribe karein!",
-        "category": "Space"
-    },
-    {
-        "title": "😴 Neend Ka Jaadu!",
-        "fact": "Aapka brain neend mein bhi active rehta hai. REM sleep mein aapka brain jagte waqt se bhi zyada kaam karta hai!",
-        "hook": "Neend ke baare mein yeh baat aapko hairan kar degi!",
-        "wrapup": "Aisa hi content ke liye subscribe karein!",
-        "category": "Psychology"
+        "category": "Space",
+        "english_title": "Space Secret That Will Blow Your Mind",
+        "description": "Incredible space fact about our universe. Subscribe for daily facts!",
+        "tags": "space,universe,facts,stars,mindblowing,shorts,viral,science,amazing,knowledge"
     },
 ]
 
-PALETTES = [
-    {"bg": (8, 8, 35),   "accent": (0, 200, 255),  "text": (255, 255, 255), "star": (180, 220, 255)},
-    {"bg": (18, 4, 32),  "accent": (180, 80, 255),  "text": (255, 255, 255), "star": (220, 180, 255)},
-    {"bg": (4, 28, 18),  "accent": (0, 255, 140),   "text": (255, 255, 255), "star": (180, 255, 220)},
-    {"bg": (35, 8, 4),   "accent": (255, 140, 0),   "text": (255, 255, 255), "star": (255, 220, 180)},
-    {"bg": (4, 18, 35),  "accent": (0, 160, 255),   "text": (255, 255, 255), "star": (180, 200, 255)},
-]
+
+# ══════════════════════════════════════════════════════
+# FONTS
+# ══════════════════════════════════════════════════════
+def download_fonts():
+    fonts = {
+        FONT_PATH: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
+        FONT_BOLD_PATH: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf",
+    }
+    for fname, url in fonts.items():
+        if not Path(fname).exists():
+            try:
+                log.info("Downloading font: " + fname)
+                r = requests.get(url, timeout=30)
+                with open(fname, "wb") as f:
+                    f.write(r.content)
+                log.info("Font downloaded: " + fname)
+            except Exception as e:
+                log.warning("Font download failed: " + str(e))
 
 
+def load_font(size, bold=False):
+    path = FONT_BOLD_PATH if bold else FONT_PATH
+    fallbacks = [
+        path,
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    for p in fallbacks:
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+# ══════════════════════════════════════════════════════
+# FACT GENERATION
+# ══════════════════════════════════════════════════════
 def fetch_fact_tavily():
     if not TAVILY_API_KEY:
         return None
@@ -112,51 +158,39 @@ def fetch_fact_tavily():
 
 def generate_fact_with_groq(raw_context):
     client = Groq(api_key=GROQ_API_KEY)
+    base_json = (
+        "{\n"
+        "  \"title\": \"short catchy Hinglish title max 5 words NO emoji\",\n"
+        "  \"hook\": \"1 sentence attention grabber Hinglish\",\n"
+        "  \"fact\": \"main fact 3-4 sentences Hinglish\",\n"
+        "  \"wrapup\": \"subscribe encouragement 1 sentence\",\n"
+        "  \"category\": \"Psychology or Space or Science or Animals or History\",\n"
+        "  \"english_title\": \"SEO YouTube title English max 60 chars\",\n"
+        "  \"description\": \"120 word English YouTube description\",\n"
+        "  \"tags\": \"tag1,tag2,tag3,tag4,tag5,tag6,tag7,tag8,tag9,tag10\"\n"
+        "}"
+    )
     if raw_context:
-        system = "You are a viral YouTube Shorts script writer for Ajeebology Shorts. Niche: Psychology, Space, Weird Facts. Language: Hinglish. Return ONLY valid JSON."
-        user = (
-            "Given this info: " + str(raw_context[:800]) +
-            "\n\nReturn ONLY this JSON:\n"
-            "{\n"
-            "  \"title\": \"emoji + catchy Hinglish title max 8 words\",\n"
-            "  \"hook\": \"1-2 sentence attention grabber Hinglish\",\n"
-            "  \"fact\": \"main fact 4-5 sentences Hinglish conversational\",\n"
-            "  \"wrapup\": \"subscribe encouragement Hinglish\",\n"
-            "  \"category\": \"Psychology or Space or Science or Animals or History\",\n"
-            "  \"english_title\": \"SEO optimized English title for YouTube\",\n"
-            "  \"description\": \"150 word English YouTube description with keywords\",\n"
-            "  \"tags\": \"tag1,tag2,tag3,tag4,tag5,tag6,tag7,tag8,tag9,tag10\"\n"
-            "}"
-        )
+        system = "YouTube Shorts script writer for Ajeebology Shorts. Hinglish language. Return ONLY valid JSON no markdown."
+        user = "Info: " + str(raw_context[:600]) + "\n\nReturn ONLY this JSON:\n" + base_json
     else:
-        system = "You are a viral YouTube Shorts script writer for Ajeebology Shorts. Language: Hinglish. Return ONLY valid JSON."
-        user = (
-            "Create an original mind-blowing fact. Return ONLY this JSON:\n"
-            "{\n"
-            "  \"title\": \"emoji + catchy Hinglish title max 8 words\",\n"
-            "  \"hook\": \"1-2 sentence attention grabber Hinglish\",\n"
-            "  \"fact\": \"main fact 4-5 sentences Hinglish conversational\",\n"
-            "  \"wrapup\": \"subscribe encouragement Hinglish\",\n"
-            "  \"category\": \"Psychology or Space or Science or Animals or History\",\n"
-            "  \"english_title\": \"SEO optimized English title for YouTube\",\n"
-            "  \"description\": \"150 word English YouTube description with keywords\",\n"
-            "  \"tags\": \"tag1,tag2,tag3,tag4,tag5,tag6,tag7,tag8,tag9,tag10\"\n"
-            "}"
-        )
+        system = "YouTube Shorts script writer for Ajeebology Shorts. Hinglish language. Return ONLY valid JSON no markdown."
+        user = "Create mind-blowing fact. Return ONLY this JSON:\n" + base_json
+
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama3-70b-8192",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
             temperature=0.85,
-            max_tokens=800,
+            max_tokens=700,
         )
         content = response.choices[0].message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         fact_data = json.loads(content)
-        log.info("Groq generated fact: " + fact_data.get("title", ""))
+        log.info("Fact generated: " + fact_data.get("title", ""))
         return fact_data
     except Exception as e:
         log.warning("Groq failed: " + str(e))
@@ -175,24 +209,17 @@ def get_todays_fact():
         return random.choice(FALLBACK_FACTS)
 
 
-def download_free_music():
+# ══════════════════════════════════════════════════════
+# MALE VOICE TTS
+# ══════════════════════════════════════════════════════
+async def generate_tts_async(text, path):
     try:
-        log.info("Downloading free background music from Pixabay...")
-        music_urls = [
-            "https://cdn.pixabay.com/download/audio/2022/03/15/audio_8cb4bae0c2.mp3",
-            "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0fd6a3ab2.mp3",
-            "https://cdn.pixabay.com/download/audio/2021/11/25/audio_5b3e7a6b5f.mp3",
-        ]
-        url = random.choice(music_urls)
-        resp = requests.get(url, timeout=30)
-        if resp.status_code == 200:
-            with open(MUSIC_FILE, "wb") as f:
-                f.write(resp.content)
-            log.info("Music downloaded successfully")
-            return True
-        return False
+        import edge_tts
+        communicate = edge_tts.Communicate(text, "hi-IN-MadhurNeural")
+        await communicate.save(str(path))
+        return True
     except Exception as e:
-        log.warning("Music download failed: " + str(e))
+        log.warning("edge-tts failed: " + str(e))
         return False
 
 
@@ -207,89 +234,118 @@ def generate_voiceover(fact):
     for i, text in enumerate(slide_texts):
         path = AUDIO_DIR / ("clip_" + str(i) + ".mp3")
         log.info("Generating TTS clip " + str(i + 1))
-        try:
-            tts = gTTS(text=text, lang="hi", slow=False)
-            tts.save(str(path))
-        except Exception as e:
-            log.error("TTS failed: " + str(e))
-            subprocess.run([
-                "ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
-                "-t", str(SLIDE_DURATION), "-q:a", "9", "-acodec", "libmp3lame",
-                str(path), "-y"
-            ], capture_output=True)
+        success = asyncio.run(generate_tts_async(text, path))
+        if not success or not path.exists():
+            try:
+                from gtts import gTTS
+                tts = gTTS(text=text, lang="hi", slow=False, tld="co.uk")
+                tts.save(str(path))
+            except Exception as e:
+                log.error("All TTS failed: " + str(e))
+                subprocess.run([
+                    "ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
+                    "-t", "5", "-q:a", "9", "-acodec", "libmp3lame",
+                    str(path), "-y"
+                ], capture_output=True)
         clips.append(path)
     return clips
 
 
-def get_audio_duration(path):
-    try:
-        result = subprocess.run([
-            "ffprobe", "-v", "error", "-show_entries",
-            "format=duration", "-of", "json", str(path)
-        ], capture_output=True, text=True)
-        data = json.loads(result.stdout)
-        return float(data["format"]["duration"])
-    except Exception:
-        return float(SLIDE_DURATION)
-
-
-def load_font(size):
-    paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+# ══════════════════════════════════════════════════════
+# BACKGROUND MUSIC
+# ══════════════════════════════════════════════════════
+def download_free_music():
+    urls = [
+        "https://cdn.pixabay.com/download/audio/2023/06/19/audio_0babde2a4c.mp3",
+        "https://cdn.pixabay.com/download/audio/2022/10/25/audio_913fb96e1f.mp3",
+        "https://cdn.pixabay.com/download/audio/2022/03/15/audio_8cb4bae0c2.mp3",
     ]
-    for p in paths:
+    for url in urls:
         try:
-            return ImageFont.truetype(p, size)
-        except Exception:
+            log.info("Downloading music...")
+            r = requests.get(url, timeout=30)
+            if r.status_code == 200 and len(r.content) > 10000:
+                with open(MUSIC_FILE, "wb") as f:
+                    f.write(r.content)
+                log.info("Music downloaded OK")
+                return True
+        except Exception as e:
+            log.warning("Music URL failed: " + str(e))
             continue
-    return ImageFont.load_default()
+    log.warning("All music downloads failed")
+    return False
 
 
-def draw_background(img, palette, slide_index):
+# ══════════════════════════════════════════════════════
+# DRAWING HELPERS
+# ══════════════════════════════════════════════════════
+def draw_gradient(img):
     draw = ImageDraw.Draw(img)
-    bg = palette["bg"]
-
-    # Gradient
+    bg1 = BRAND["bg_dark"]
+    bg2 = BRAND["bg_mid"]
     for y in range(HEIGHT):
-        ratio = y / HEIGHT
-        r = min(255, int(bg[0] + 20 * ratio))
-        g = min(255, int(bg[1] + 20 * ratio))
-        b = min(255, int(bg[2] + 30 * ratio))
+        t = y / HEIGHT
+        r = int(bg1[0] + (bg2[0] - bg1[0]) * t)
+        g = int(bg1[1] + (bg2[1] - bg1[1]) * t)
+        b = int(bg1[2] + (bg2[2] - bg1[2]) * t)
         draw.line([(0, y), (WIDTH, y)], fill=(r, g, b))
 
-    # Stars
-    random.seed(slide_index * 42)
-    for _ in range(150):
+
+def draw_stars_animated(draw, frame, count=120):
+    random.seed(42)
+    for _ in range(count):
         x = random.randint(0, WIDTH)
         y = random.randint(0, HEIGHT)
-        r = random.randint(1, 3)
-        bright = random.randint(150, 255)
-        draw.ellipse([x-r, y-r, x+r, y+r], fill=(bright, bright, bright))
-
-    # Glowing circles decoration
-    accent = palette["accent"]
-    for radius, alpha_div in [(200, 8), (150, 6), (100, 4)]:
-        overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-        ov_draw = ImageDraw.Draw(overlay)
-        cx, cy = WIDTH // 2, HEIGHT // 3
-        a = accent[0] // alpha_div
-        b2 = accent[1] // alpha_div
-        c2 = accent[2] // alpha_div
-        ov_draw.ellipse(
-            [cx-radius, cy-radius, cx+radius, cy+radius],
-            fill=(a, b2, c2, 40)
-        )
-        img.paste(Image.new("RGB", (WIDTH, HEIGHT), (0,0,0)), mask=overlay.split()[3])
-
-    # Grid lines (subtle)
-    for x in range(0, WIDTH, 80):
-        draw.line([(x, 0), (x, HEIGHT)], fill=(255, 255, 255, 8), width=1)
-    for y2 in range(0, HEIGHT, 80):
-        draw.line([(0, y2), (WIDTH, y2)], fill=(255, 255, 255, 8), width=1)
-
+        base_r = random.randint(1, 3)
+        # Twinkle effect
+        twinkle = abs(math.sin(frame * 0.1 + random.random() * 6))
+        brightness = int(100 + 155 * twinkle)
+        r = max(1, int(base_r * (0.5 + twinkle * 0.5)))
+        draw.ellipse([x-r, y-r, x+r, y+r],
+                     fill=(brightness, int(brightness*0.8), 255))
     random.seed()
+
+
+def draw_glowing_circle(draw, cx, cy, radius, color, alpha_max=60):
+    for i in range(5):
+        r = radius + i * 15
+        a = max(0, alpha_max - i * 12)
+        for _ in range(3):
+            draw.ellipse(
+                [cx-r, cy-r, cx+r, cy+r],
+                outline=(*color, a),
+                width=2
+            )
+
+
+def draw_particles(draw, frame, count=25):
+    random.seed(frame // 3)
+    for i in range(count):
+        angle = (frame * 2 + i * 30) % 360
+        rad = math.radians(angle)
+        dist = 80 + (i % 5) * 40
+        cx = WIDTH // 2 + int(dist * math.cos(rad))
+        cy = HEIGHT // 3 + int(dist * math.sin(rad) * 0.5)
+        size = random.randint(2, 5)
+        colors = [BRAND["purple2"], BRAND["cyan"], BRAND["white"]]
+        color = colors[i % 3]
+        draw.ellipse([cx-size, cy-size, cx+size, cy+size], fill=color)
+    random.seed()
+
+
+def draw_circuit_lines(draw, alpha=30):
+    positions = [
+        [(0, 200), (150, 200), (150, 350), (300, 350)],
+        [(WIDTH, 400), (WIDTH-120, 400), (WIDTH-120, 550), (WIDTH-250, 550)],
+        [(0, 900), (100, 900), (100, 800), (200, 800)],
+        [(WIDTH, 1000), (WIDTH-150, 1000), (WIDTH-150, 1100), (WIDTH-80, 1100)],
+    ]
+    color = BRAND["purple1"]
+    for path in positions:
+        for j in range(len(path) - 1):
+            draw.line([path[j], path[j+1]], fill=color, width=1)
+            end = path[j+1]
+            draw.ellipse([end[0]-4, end[1]-4, end[0]+4, end[1]+4], fill=BRAND["cyan"])
 
 
 def wrap_text(text, font, max_width):
@@ -299,8 +355,12 @@ def wrap_text(text, font, max_width):
     dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     for word in words:
         test = (current + " " + word).strip()
-        bbox = dummy.textbbox((0, 0), test, font=font)
-        if bbox[2] <= max_width:
+        try:
+            bbox = dummy.textbbox((0, 0), test, font=font)
+            width = bbox[2] - bbox[0]
+        except Exception:
+            width = len(test) * 20
+        if width <= max_width:
             current = test
         else:
             if current:
@@ -311,212 +371,343 @@ def wrap_text(text, font, max_width):
     return lines
 
 
-def draw_text_glow(draw, pos, text, font, color, accent):
+def draw_glowing_text(draw, pos, text, font, color, glow_color, glow_range=3):
     x, y = pos
-    # Glow effect
-    for offset in [(3,3), (-3,3), (3,-3), (-3,-3), (0,4), (4,0), (-4,0), (0,-4)]:
-        draw.text((x+offset[0], y+offset[1]), text, font=font,
-                  fill=(accent[0]//3, accent[1]//3, accent[2]//3))
-    # Shadow
+    for dx in range(-glow_range, glow_range + 1):
+        for dy in range(-glow_range, glow_range + 1):
+            if dx != 0 or dy != 0:
+                draw.text((x+dx, y+dy), text, font=font, fill=glow_color)
     draw.text((x+2, y+2), text, font=font, fill=(0, 0, 0))
-    # Main text
     draw.text((x, y), text, font=font, fill=color)
 
 
-def create_slide(slide_index, total_slides, title, body_text, palette, emoji_top="✨"):
-    img = Image.new("RGB", (WIDTH, HEIGHT), color=palette["bg"])
-    draw_background(img, palette, slide_index)
+# ══════════════════════════════════════════════════════
+# ANIMATED FRAME CREATION
+# ══════════════════════════════════════════════════════
+def get_text_width(draw, text, font):
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        return len(text) * 20, 30
+
+
+def create_animated_frame(
+    frame_num,
+    total_frames,
+    slide_index,
+    total_slides,
+    title,
+    body_text,
+    category,
+    progress_text=""
+):
+    img = Image.new("RGB", (WIDTH, HEIGHT), color=BRAND["bg_dark"])
+    draw_gradient(img)
     draw = ImageDraw.Draw(img)
 
-    accent = palette["accent"]
-    text_color = palette["text"]
-    pad = 45
+    t = frame_num / max(total_frames - 1, 1)
+    pad = 40
 
-    font_channel = load_font(28)
-    font_emoji   = load_font(55)
-    font_title   = load_font(52)
-    font_body    = load_font(38)
-    font_cta     = load_font(32)
-    font_dot     = load_font(22)
+    # Circuit lines
+    draw_circuit_lines(draw)
 
-    # Top bar
-    draw.rectangle([0, 0, WIDTH, 90], fill=(0, 0, 0))
-    draw.text((pad, 28), "AJEEBOLOGY SHORTS", font=font_channel, fill=accent)
-    draw.line([(0, 90), (WIDTH, 90)], fill=accent, width=2)
+    # Animated stars
+    draw_stars_animated(draw, frame_num)
+
+    # Glowing orbs (pulsing)
+    pulse = 0.7 + 0.3 * math.sin(frame_num * 0.15)
+    cx, cy = WIDTH // 2, HEIGHT // 3
+
+    for radius, color in [(180, BRAND["glow_p"]), (120, BRAND["glow_c"])]:
+        r = int(radius * pulse)
+        for thickness in range(4, 0, -1):
+            alpha_val = int(15 * thickness * pulse)
+            overlay_color = (
+                min(255, color[0] + alpha_val),
+                min(255, color[1] + alpha_val),
+                min(255, color[2] + alpha_val),
+            )
+            draw.ellipse(
+                [cx-r-thickness*3, cy-r-thickness*3,
+                 cx+r+thickness*3, cy+r+thickness*3],
+                outline=overlay_color, width=1
+            )
+
+    # Particles
+    draw_particles(draw, frame_num)
+
+    # TOP BAR
+    draw.rectangle([0, 0, WIDTH, 85], fill=(5, 2, 15))
+    draw.line([(0, 85), (WIDTH, 85)], fill=BRAND["cyan"], width=2)
+
+    font_top = load_font(26, bold=True)
+    draw.text((pad, 25), "AJEEBOLOGY SHORTS", font=font_top, fill=BRAND["cyan"])
+
+    # Live dot animation
+    dot_alpha = int(255 * abs(math.sin(frame_num * 0.2)))
+    dot_color = (dot_alpha, 255 - dot_alpha // 2, 100)
+    draw.ellipse([WIDTH-60, 32, WIDTH-40, 52], fill=dot_color)
+    font_live = load_font(20)
+    draw.text((WIDTH-35, 32), "LIVE", font=font_live, fill=BRAND["white"])
 
     # Progress dots
-    dot_y = 115
-    spacing = 24
+    dot_y = 110
+    spacing = 28
     total_w = (total_slides - 1) * spacing
     start_x = (WIDTH - total_w) // 2
     for i in range(total_slides):
         x = start_x + i * spacing
         if i == slide_index:
-            draw.ellipse([x-8, dot_y-8, x+8, dot_y+8], fill=accent)
+            pulse_r = int(10 + 3 * math.sin(frame_num * 0.2))
+            draw.ellipse([x-pulse_r, dot_y-pulse_r, x+pulse_r, dot_y+pulse_r],
+                         fill=BRAND["cyan"])
+            draw.ellipse([x-6, dot_y-6, x+6, dot_y+6], fill=BRAND["white"])
         else:
-            draw.ellipse([x-5, dot_y-5, x+5, dot_y+5], fill=(80, 80, 80))
+            draw.ellipse([x-5, dot_y-5, x+5, dot_y+5], fill=(60, 40, 100))
 
-    # Big emoji
-    emoji_bbox = draw.textbbox((0, 0), emoji_top, font=font_emoji)
-    ew = emoji_bbox[2] - emoji_bbox[0]
-    draw.text(((WIDTH - ew) // 2, 145), emoji_top, font=font_emoji, fill=text_color)
+    # Category badge
+    font_badge = load_font(24, bold=True)
+    cat_icons = {
+        "Psychology": "BRAIN",
+        "Space": "SPACE",
+        "Science": "SCIENCE",
+        "Animals": "NATURE",
+        "History": "HISTORY",
+    }
+    badge_text = "[ " + cat_icons.get(category, "FACTS") + " ]"
+    bw, bh = get_text_width(draw, badge_text, font_badge)
+    bx = (WIDTH - bw) // 2
+    by = 140
+    draw.rounded_rectangle([bx-15, by-8, bx+bw+15, by+bh+8],
+                            radius=15, fill=BRAND["purple1"])
+    draw.text((bx, by), badge_text, font=font_badge, fill=BRAND["cyan"])
 
-    # Accent line top
-    draw.line([(pad, 225), (WIDTH-pad, 225)], fill=accent, width=3)
-
-    # Title
+    # TITLE with slide-in animation
+    font_title = load_font(54, bold=True)
     title_lines = wrap_text(title, font_title, WIDTH - pad*2)
-    ty = 245
+    title_y = 210
+
+    slide_offset = max(0, int(50 * (1 - t * 3))) if t < 0.33 else 0
+    title_alpha = min(1.0, t * 4)
+
     for line in title_lines:
-        bbox = draw.textbbox((0, 0), line, font=font_title)
-        lw = bbox[2] - bbox[0]
-        draw_text_glow(draw, ((WIDTH-lw)//2, ty), line, font_title, text_color, accent)
-        ty += bbox[3] - bbox[1] + 8
+        lw, lh = get_text_width(draw, line, font_title)
+        tx = (WIDTH - lw) // 2
+        ty = title_y + slide_offset
+        glow_color = (
+            int(BRAND["purple2"][0] * title_alpha),
+            int(BRAND["purple2"][1] * title_alpha),
+            int(BRAND["purple2"][2] * title_alpha),
+        )
+        text_color = (
+            int(BRAND["white"][0] * title_alpha),
+            int(BRAND["white"][1] * title_alpha),
+            int(BRAND["white"][2] * title_alpha),
+        )
+        draw_glowing_text(draw, (tx, ty), line, font_title, text_color, glow_color)
+        title_y += lh + 8
 
-    # Divider
-    draw.line([(pad*2, ty+15), (WIDTH-pad*2, ty+15)], fill=accent, width=2)
+    # Animated divider line
+    div_y = title_y + 20
+    line_progress = min(1.0, t * 2)
+    line_end = int(pad + (WIDTH - pad*2) * line_progress)
+    if line_end > pad:
+        draw.line([(pad, div_y), (line_end, div_y)],
+                  fill=BRAND["cyan"], width=3)
+        draw.ellipse([line_end-5, div_y-5, line_end+5, div_y+5],
+                     fill=BRAND["cyan"])
 
-    # Body text box
-    box_top = ty + 30
-    body_lines = wrap_text(body_text, font_body, WIDTH - pad*2 - 20)
-    body_height = len(body_lines) * 55 + 30
+    # BODY TEXT BOX with fade-in
+    font_body = load_font(36)
+    body_lines = wrap_text(body_text, font_body, WIDTH - pad*2 - 30)
+    body_height = len(body_lines) * 52 + 40
+    box_top = div_y + 30
+
+    body_alpha = max(0, min(1.0, (t - 0.2) * 3))
+
+    # Glowing border box
+    box_color = (
+        int(BRAND["purple1"][0] * body_alpha * 0.5),
+        int(BRAND["purple1"][1] * body_alpha * 0.5),
+        int(BRAND["purple1"][2] * body_alpha * 0.5),
+    )
     draw.rounded_rectangle(
-        [pad-10, box_top, WIDTH-pad+10, box_top+body_height],
-        radius=18,
-        fill=(0, 0, 0)
+        [pad-5, box_top-5, WIDTH-pad+5, box_top+body_height+5],
+        radius=20, fill=box_color
+    )
+    draw.rounded_rectangle(
+        [pad, box_top, WIDTH-pad, box_top+body_height],
+        radius=18, fill=(8, 4, 20)
+    )
+    # Cyan border with pulse
+    border_pulse = int(180 + 75 * math.sin(frame_num * 0.15))
+    draw.rounded_rectangle(
+        [pad, box_top, WIDTH-pad, box_top+body_height],
+        radius=18, outline=(0, border_pulse, 255), width=2
     )
 
-    by = box_top + 15
+    by2 = box_top + 20
     for line in body_lines:
-        bbox = draw.textbbox((0, 0), line, font=font_body)
-        lw = bbox[2] - bbox[0]
-        draw.text(((WIDTH-lw)//2, by), line, font=font_body, fill=text_color)
-        by += bbox[3] - bbox[1] + 12
+        lw, lh = get_text_width(draw, line, font_body)
+        tx = (WIDTH - lw) // 2
+        text_col = (
+            int(BRAND["white"][0] * body_alpha),
+            int(BRAND["white"][1] * body_alpha),
+            int(BRAND["white"][2] * body_alpha),
+        )
+        draw.text((tx, by2), line, font=font_body, fill=text_col)
+        by2 += lh + 12
 
-    # CTA box at bottom
-    cta_box_top = HEIGHT - 220
-    draw.rectangle([0, cta_box_top, WIDTH, HEIGHT], fill=(0, 0, 0))
-    draw.line([(0, cta_box_top), (WIDTH, cta_box_top)], fill=accent, width=3)
+    # Progress bar at bottom of text box
+    if t > 0.3:
+        bar_y = box_top + body_height + 10
+        bar_progress = (t - 0.3) / 0.7
+        bar_w = int((WIDTH - pad*2) * bar_progress)
+        draw.rectangle([pad, bar_y, pad+bar_w, bar_y+4],
+                       fill=BRAND["purple2"])
+        draw.rectangle([pad+bar_w-3, bar_y-2, pad+bar_w+3, bar_y+6],
+                       fill=BRAND["cyan"])
 
-    cta_lines = [
-        "🔔 Subscribe Now!",
-        "Daily Facts at 5:00 PM PKT",
-        "@AjeebologyShorts",
+    # CTA SECTION
+    cta_top = HEIGHT - 230
+    draw.rectangle([0, cta_top, WIDTH, HEIGHT], fill=(5, 2, 15))
+    draw.line([(0, cta_top), (WIDTH, cta_top)],
+              fill=BRAND["purple2"], width=3)
+
+    font_cta = load_font(30, bold=True)
+    font_sub = load_font(26)
+
+    cta_pulse = int(200 + 55 * abs(math.sin(frame_num * 0.25)))
+    cta_color = (cta_pulse, 80, 255)
+
+    cta_items = [
+        ("SUBSCRIBE NOW!", font_cta, cta_color),
+        ("Daily Facts at 5:00 PM PKT", font_sub, BRAND["white"]),
+        ("@AjeebologyShorts", font_sub, BRAND["cyan"]),
     ]
-    cy = cta_box_top + 18
-    for line in cta_lines:
-        bbox = draw.textbbox((0, 0), line, font=font_cta)
-        lw = bbox[2] - bbox[0]
-        draw.text(((WIDTH-lw)//2, cy), line, font=font_cta, fill=accent)
-        cy += 52
+    cy2 = cta_top + 20
+    for text_item, font_item, color_item in cta_items:
+        lw, lh = get_text_width(draw, text_item, font_item)
+        draw.text(((WIDTH-lw)//2, cy2), text_item,
+                  font=font_item, fill=color_item)
+        cy2 += lh + 18
 
     return img
 
 
-def create_all_slides(fact):
-    FRAMES_DIR.mkdir(exist_ok=True)
-    palette = random.choice(PALETTES)
+# ══════════════════════════════════════════════════════
+# SLIDE GENERATION
+# ══════════════════════════════════════════════════════
+def get_audio_duration(path):
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=duration", "-of", "json", str(path)
+        ], capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        return float(data["format"]["duration"])
+    except Exception:
+        return 5.0
 
-    cat = fact.get("category", "Facts")
-    cat_emojis = {
-        "Psychology": "🧠",
-        "Space": "🌌",
-        "Science": "⚗️",
-        "Animals": "🐾",
-        "History": "📜",
-    }
-    emoji = cat_emojis.get(cat, "✨")
+
+def create_slide_frames(
+    slide_index, total_slides,
+    title, body_text, category,
+    duration_secs
+):
+    total_frames = int(duration_secs * FPS)
+    paths = []
+    log.info("Creating " + str(total_frames) + " frames for slide " + str(slide_index+1))
+    for f in range(total_frames):
+        img = create_animated_frame(
+            f, total_frames,
+            slide_index, total_slides,
+            title, body_text, category
+        )
+        path = FRAMES_DIR / ("s" + str(slide_index) + "_f" + str(f).zfill(4) + ".png")
+        img.save(str(path), "PNG")
+        paths.append(path)
+    return paths
+
+
+def create_all_slides(fact, audio_clips):
+    FRAMES_DIR.mkdir(exist_ok=True)
+    category = fact.get("category", "Facts")
 
     slides_data = [
         {
             "title": fact["title"],
             "body": fact.get("hook", "Yeh jaankar aap hairan ho jayenge!"),
-            "emoji": emoji
         },
         {
-            "title": cat + " Fact",
+            "title": category + " Fact",
             "body": fact["fact"],
-            "emoji": "🔍"
         },
         {
-            "title": "Mind = Blown!",
+            "title": "Mind Blown!",
             "body": fact.get("wrapup", "Subscribe karein for daily amazing facts!"),
-            "emoji": "💥"
         },
     ]
 
-    slide_paths = []
+    all_frame_paths = []
     thumbnail = None
 
-    for i, slide in enumerate(slides_data):
-        log.info("Creating slide " + str(i+1))
-        img = create_slide(i, len(slides_data), slide["title"], slide["body"],
-                           palette, slide["emoji"])
-        path = FRAMES_DIR / ("slide_" + str(i).zfill(3) + ".png")
-        img.save(str(path), "PNG")
-        slide_paths.append(path)
-        if i == 0:
-            thumbnail = img
+    for i, (slide, audio) in enumerate(zip(slides_data, audio_clips)):
+        dur = get_audio_duration(audio)
+        frame_paths = create_slide_frames(
+            i, len(slides_data),
+            slide["title"], slide["body"],
+            category, dur
+        )
+        all_frame_paths.extend(frame_paths)
+        if i == 0 and frame_paths:
+            thumbnail = Image.open(str(frame_paths[len(frame_paths)//2]))
 
-    return slide_paths, thumbnail
+    return all_frame_paths, thumbnail
 
 
-def build_video(slide_paths, audio_clips):
-    log.info("Building video...")
-    durations = [get_audio_duration(a) for a in audio_clips]
+# ══════════════════════════════════════════════════════
+# VIDEO BUILD
+# ══════════════════════════════════════════════════════
+def build_video(audio_clips):
+    log.info("Building video with FFmpeg...")
     has_music = Path(MUSIC_FILE).exists()
 
-    inputs = []
-    for slide, dur in zip(slide_paths, durations):
-        inputs += ["-loop", "1", "-t", str(dur), "-i", str(slide)]
+    # Concat all audio clips first
+    concat_audio = "concat_audio.mp3"
+    audio_list_file = "audio_list.txt"
+    with open(audio_list_file, "w") as f:
+        for clip in audio_clips:
+            f.write("file '" + str(clip.resolve()) + "'\n")
 
-    audio_inputs = []
-    for a in audio_clips:
-        audio_inputs += ["-i", str(a)]
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", audio_list_file,
+        "-c", "copy", concat_audio
+    ], capture_output=True)
 
-    if has_music:
-        audio_inputs += ["-i", MUSIC_FILE]
+    # All frames in order
+    frame_pattern = str(FRAMES_DIR / "s%d_f%04d.png")
 
-    n = len(slide_paths)
-    na = len(audio_clips)
-
-    filter_parts = []
-    for i in range(n):
-        filter_parts.append(
-            "[" + str(i) + ":v]scale=" + str(WIDTH) + ":" + str(HEIGHT) +
-            ":force_original_aspect_ratio=decrease,"
-            "pad=" + str(WIDTH) + ":" + str(HEIGHT) +
-            ":(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v" + str(i) + "];"
-        )
-
-    video_concat = "".join(["[v" + str(i) + "]" for i in range(n)])
-    audio_concat = "".join(["[" + str(n+i) + ":a]" for i in range(na)])
-
-    filter_parts.append(video_concat + "concat=n=" + str(n) + ":v=1:a=0[vout];")
+    # Build using frame sequence
+    # Get all frames sorted
+    all_frames = sorted(FRAMES_DIR.glob("*.png"))
+    frame_list_file = "frame_list.txt"
+    with open(frame_list_file, "w") as f:
+        for frame in all_frames:
+            f.write("file '" + str(frame.resolve()) + "'\n")
+            f.write("duration " + str(1.0/FPS) + "\n")
 
     if has_music:
-        music_index = n + na
-        total_dur = sum(durations)
-        filter_parts.append(
-            audio_concat + "concat=n=" + str(na) + ":v=0:a=1[voice];"
-            "[" + str(music_index) + ":a]aloop=loop=-1:size=2e+09,asetpts=N/SR/TB,"
-            "volume=0.15[music];"
-            "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-        )
-    else:
-        filter_parts.append(
-            audio_concat + "concat=n=" + str(na) + ":v=0:a=1[aout]"
-        )
-
-    filter_complex = "".join(filter_parts)
-
-    cmd = (
-        ["ffmpeg", "-y"]
-        + inputs
-        + audio_inputs
-        + [
-            "-filter_complex", filter_complex,
-            "-map", "[vout]",
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", frame_list_file,
+            "-i", concat_audio,
+            "-i", MUSIC_FILE,
+            "-filter_complex",
+            "[1:a]volume=1.0[voice];[2:a]volume=0.12,aloop=loop=-1:size=2e+09[music];[voice][music]amix=inputs=2:duration=first[aout]",
+            "-map", "0:v",
             "-map", "[aout]",
             "-c:v", "libx264",
             "-preset", "fast",
@@ -524,65 +715,67 @@ def build_video(slide_paths, audio_clips):
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
+            "-r", str(FPS),
             "-shortest",
             "-movflags", "+faststart",
             OUTPUT_VIDEO
         ]
-    )
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", frame_list_file,
+            "-i", concat_audio,
+            "-map", "0:v",
+            "-map", "1:a",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-r", str(FPS),
+            "-shortest",
+            "-movflags", "+faststart",
+            OUTPUT_VIDEO
+        ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        log.error("FFmpeg error: " + result.stderr[-1500:])
+        log.error("FFmpeg error: " + result.stderr[-2000:])
         return False
-    log.info("Video created successfully")
+    log.info("Video built successfully!")
     return True
 
 
-def build_artifact_url():
-    if GITHUB_REPO and GITHUB_RUN_ID:
-        return "https://github.com/" + GITHUB_REPO + "/actions/runs/" + GITHUB_RUN_ID
-    return "https://github.com"
-
-
+# ══════════════════════════════════════════════════════
+# TELEGRAM
+# ══════════════════════════════════════════════════════
 def generate_youtube_metadata(fact):
-    category = fact.get("category", "Facts")
-    english_title = fact.get("english_title", fact["title"] + " | Ajeebology Shorts")
-    date_str = datetime.now().strftime("%d %b %Y")
-
-    description = fact.get("description", "")
-    if not description:
-        description = (
-            "Welcome to Ajeebology Shorts! Today we explore an amazing "
-            + category + " fact that will blow your mind. "
-            "We bring you daily psychology facts, space secrets, and weird world facts "
-            "in short engaging videos. Subscribe for daily content at 5:00 PM PKT!\n\n"
-            "For Business: ubaidurehman983@gmail.com"
-        )
-
-    description += (
-        "\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📺 AJEEBOLOGY SHORTS\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔔 Subscribe for daily facts at 5:00 PM PKT!\n"
-        "📧 Business: ubaidurehman983@gmail.com\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📅 Published: " + date_str
+    english_title = fact.get(
+        "english_title",
+        fact["title"] + " | Ajeebology Shorts"
     )
-
+    date_str = datetime.now().strftime("%d %b %Y")
+    description = fact.get("description", "Amazing facts daily on Ajeebology Shorts!")
+    description += (
+        "\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        "AJEEBOLOGY SHORTS\n"
+        "Daily Facts at 5:00 PM PKT\n"
+        "Business: ubaidurehman983@gmail.com\n"
+        "Published: " + date_str +
+        "\n━━━━━━━━━━━━━━━━━━━━━━"
+    )
     raw_tags = fact.get("tags", "")
     if raw_tags:
         tag_list = [t.strip() for t in raw_tags.split(",")]
     else:
         tag_list = [
-            "AjeebologyShorts", "facts", "psychology", "space", "sciencefacts",
-            "mindblowingtfacts", "didyouknow", "amazingfacts", "shorts",
-            "youtubeshorts", "hindifacts", "urdu", "viral", "trending",
-            "knowledge", "education", "brainpower", category.lower(),
+            "AjeebologyShorts", "facts", "psychology", "space",
+            "mindblowing", "didyouknow", "shorts", "viral",
+            "hindi", "knowledge", "science", "amazing",
         ]
-
-    hashtags = " ".join(["#" + t.replace(" ", "").replace("#", "") for t in tag_list[:15]])
-
+    hashtags = " ".join(["#" + t.replace(" ", "").replace("#", "")
+                         for t in tag_list[:15]])
     return english_title, description, tag_list, hashtags
 
 
@@ -601,10 +794,10 @@ def send_telegram_message(text):
         return False
 
 
-def send_telegram_video(video_path, caption):
+def send_telegram_video(caption):
     url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendVideo"
     try:
-        with open(video_path, "rb") as vf:
+        with open(OUTPUT_VIDEO, "rb") as vf:
             resp = requests.post(
                 url,
                 data={
@@ -622,10 +815,10 @@ def send_telegram_video(video_path, caption):
         return False
 
 
-def send_telegram_photo(photo_path, caption):
+def send_telegram_photo(caption):
     url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendPhoto"
     try:
-        with open(photo_path, "rb") as f:
+        with open(THUMBNAIL_FILE, "rb") as f:
             resp = requests.post(
                 url,
                 data={
@@ -643,85 +836,84 @@ def send_telegram_photo(photo_path, caption):
 
 
 def notify_telegram(fact, video_ok):
-    artifact_url = build_artifact_url()
+    artifact_url = (
+        "https://github.com/" + GITHUB_REPO +
+        "/actions/runs/" + GITHUB_RUN_ID
+        if GITHUB_REPO and GITHUB_RUN_ID
+        else "https://github.com"
+    )
     date_str = datetime.now().strftime("%d %b %Y %H:%M UTC")
     english_title, description, tag_list, hashtags = generate_youtube_metadata(fact)
 
     if video_ok:
-        # Send video/thumbnail first
         video_caption = (
             "🎬 <b>" + english_title + "</b>\n\n"
-            + fact["hook"] + "\n\n"
+            + fact.get("hook", "") + "\n\n"
             + hashtags
         )
 
         size_mb = 0
         if Path(OUTPUT_VIDEO).exists():
-            size_mb = Path(OUTPUT_VIDEO).stat().st_size / (1024 * 1024)
+            size_mb = Path(OUTPUT_VIDEO).stat().st_size / (1024*1024)
 
         if size_mb < 48:
-            send_telegram_video(OUTPUT_VIDEO, video_caption)
+            send_telegram_video(video_caption)
         elif Path(THUMBNAIL_FILE).exists():
-            send_telegram_photo(THUMBNAIL_FILE, video_caption)
+            send_telegram_photo(video_caption)
 
-        # Send full metadata message
         tags_str = ", ".join(tag_list[:20])
 
         metadata_msg = (
             "✅ <b>VIDEO READY — " + date_str + "</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-            "🎬 <b>YOUTUBE TITLE:</b>\n"
-            + english_title + "\n\n"
-
-            "📝 <b>DESCRIPTION:</b>\n"
-            + description[:800] + "\n\n"
-
-            "🏷️ <b>TAGS:</b>\n"
-            + tags_str + "\n\n"
-
-            "#️⃣ <b>HASHTAGS:</b>\n"
-            + hashtags + "\n\n"
-
-            "📥 <b>DOWNLOAD VIDEO:</b>\n"
-            "<a href='" + artifact_url + "'>👉 Click Here — GitHub Artifact</a>\n\n"
-
-            "⏰ <b>Upload at:</b> 5:00 PM PKT sharp\n"
-            "📧 <b>Business:</b> ubaidurehman983@gmail.com\n"
+            "🎬 <b>YOUTUBE TITLE:</b>\n" + english_title + "\n\n"
+            "📝 <b>DESCRIPTION:</b>\n" + description[:700] + "\n\n"
+            "🏷️ <b>TAGS:</b>\n" + tags_str + "\n\n"
+            "#️⃣ <b>HASHTAGS:</b>\n" + hashtags + "\n\n"
+            "📥 <b>DOWNLOAD:</b>\n"
+            "<a href='" + artifact_url + "'>Click Here - GitHub Artifact</a>\n\n"
+            "⏰ Upload at 5:00 PM PKT\n"
+            "📧 ubaidurehman983@gmail.com\n"
             "━━━━━━━━━━━━━━━━━━━━━━"
         )
         send_telegram_message(metadata_msg)
-
     else:
         send_telegram_message(
             "❌ <b>VIDEO FAILED — " + date_str + "</b>\n\n"
-            "Check logs:\n<a href='" + artifact_url + "'>GitHub Actions</a>"
+            "Logs: <a href='" + artifact_url + "'>GitHub Actions</a>"
         )
 
 
+# ══════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════
 def main():
     log.info("AJEEBOLOGY SHORTS AGENT STARTED")
 
-    log.info("STEP 1: Fetching fact...")
+    log.info("STEP 1: Downloading fonts...")
+    download_fonts()
+
+    log.info("STEP 2: Fetching fact...")
     fact = get_todays_fact()
     log.info("Fact: " + fact["title"])
 
-    log.info("STEP 2: Downloading background music...")
+    log.info("STEP 3: Downloading music...")
     download_free_music()
 
-    log.info("STEP 3: Generating voiceover...")
+    log.info("STEP 4: Generating male voiceover...")
     audio_clips = generate_voiceover(fact)
 
-    log.info("STEP 4: Creating slides...")
-    slide_paths, thumbnail = create_all_slides(fact)
+    log.info("STEP 5: Creating animated frames...")
+    all_frames, thumbnail = create_all_slides(fact, audio_clips)
 
     if thumbnail:
         thumbnail.save(THUMBNAIL_FILE, "PNG")
+        log.info("Thumbnail saved")
 
-    log.info("STEP 5: Building video...")
-    video_ok = build_video(slide_paths, audio_clips)
+    log.info("STEP 6: Building video...")
+    video_ok = build_video(audio_clips)
 
-    log.info("STEP 6: Sending Telegram notification...")
+    log.info("STEP 7: Sending Telegram notification...")
     notify_telegram(fact, video_ok)
 
     if video_ok:
