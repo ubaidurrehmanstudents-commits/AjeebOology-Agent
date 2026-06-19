@@ -12,19 +12,19 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 client = Groq(api_key=GROQ_API_KEY)
 print("🚀 AjeebOology Engine Script Started...")
 
-# 2. Generate Viral Script using Groq
+# 2. Generate Viral Script using Groq (Strict Roman Urdu Prompt)
 prompt = """
 You are the scriptwriter for 'AjeebOology' YouTube Channel. 
-Generate 1 psychological fact or mind-blowing strange reality in Roman Urdu/Hindi.
-The tone must be shocking, fast-paced, and hook the viewer within 2 seconds.
-Keep the script short enough for a 30-second YouTube Short.
+Generate 1 psychological fact or mind-blowing strange reality.
 
-Also provide an engaging YouTube Title and viral tags.
+CRITICAL RULE: Write EVERYTHING using English Alphabets ONLY (Roman Urdu/Hindi style, like 'Kya aapko pata hai...'). 
+Do NOT use Devanagari/Hindi script (like हिंदी) and do NOT use Urdu script. Use only plain English letters.
+The tone must be shocking and fast-paced. Keep it short for a 30-second YouTube Short.
 
 Format the output exactly like this:
-TITLE: [Your Title Here]
+TITLE: [Your Title in Roman Urdu using English letters]
 TAGS: [Your Tags Here]
-SCRIPT: [Your 30-second Roman Urdu Script Here]
+SCRIPT: [Your 30-second Roman Urdu Script Here using English letters]
 """
 
 chat_completion = client.chat.completions.create(
