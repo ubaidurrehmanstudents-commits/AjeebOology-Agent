@@ -1,0 +1,46 @@
+name: YouTube Shorts Automation Agent
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # Daily 5:00 PM PKT (12:00 PM UTC) par automatic chalega
+  workflow_dispatch:      # Manual chalanay ke liye button mil jayega
+
+jobs:
+  build-and-generate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Install Python Libraries
+      run: |
+        pip install --upgrade pip
+        pip install groq tavily-python gTTS Pillow requests
+
+    - name: Run YouTube Agent Script
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python youtube_agent.py
+
+    - name: Upload Video Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: daily-shorts-video
+        path: |
+          output_video.mp4
+          thumbnail.png
+          
