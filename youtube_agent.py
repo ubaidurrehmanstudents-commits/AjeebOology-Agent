@@ -1,13 +1,46 @@
-# ══════════════════════════════════════════════════════
-# PART 1 OF 2 — AUDIO PIPELINE
-# (Script generation, pause-trimming, speed-up, SFX, ducking)
-# This is a standalone-testable module. Part 2 will add the
-# visual/video pipeline and the main() that ties both together.
-# ══════════════════════════════════════════════════════
+"""
+AJEEBOLOGY SHORTS — YouTube AI Automation Agent (Master Consolidated Version)
+
+Pipeline: Tavily search -> Groq script generation -> edge-tts male voiceover
+-> ffmpeg pause-trim (NO forced speedup) -> Pixabay SFX/music (best-effort)
+-> Whisper word-timestamp transcription -> Ken Burns animated frame
+rendering with karaoke text -> crossfade -> final ffmpeg assembly ->
+Telegram delivery with full SEO metadata.
+
+═══════════════════════════════════════════════════════════════════
+HONEST STATUS NOTE — READ BEFORE RUNNING
+═══════════════════════════════════════════════════════════════════
+This file has NOT been executed or tested in any real environment.
+No Whisper, ffmpeg, or full pipeline test was possible where this was
+written. Every fix here is reasoned from prior failures you reported,
+not verified working code.
+
+Two specific fixes are included based on real bugs you hit:
+  1. Video cutting off before audio finished -> frame timing now
+     derives from the REAL final mixed audio duration (ffprobe-measured),
+     not estimated segment durations.
+  2. Final video being much SHORTER than expected -> the forced 1.06x
+     atempo speedup (which compounded with silence-trimming) has been
+     REMOVED by default, and silenceremove thresholds loosened so it
+     trims only genuinely long dead air, not natural speech gaps.
+
+Still unverified / highest risk if something breaks next:
+  - Whisper transcription accuracy on Hinglish/Roman-script Hindi
+  - The global-to-local word index mapping for karaoke highlighting
+  - Pixabay SFX/music URLs (file IDs unconfirmed)
+  - ffmpeg sidechaincompress support on the GitHub Actions runner
+
+After running this, if anything is still off, send me the GitHub
+Actions log line that says "FINAL AUDIO DURATION: Xs" and "Total
+frames: X" — those two numbers let me diagnose precisely instead
+of guessing again.
+═══════════════════════════════════════════════════════════════════
+"""
 
 import os
 import sys
 import json
+import math
 import random
 import logging
 import requests
@@ -17,7 +50,11 @@ from pathlib import Path
 from datetime import datetime
 
 from groq import Groq
+from PIL import Image, ImageDraw, ImageFont
 
+# ══════════════════════════════════════════════════════
+# LOGGING
+# ══════════════════════════════════════════════════════
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -25,6 +62,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("AjeebologyAgent")
 
+# ══════════════════════════════════════════════════════
+# ENVIRONMENT / CONFIG
+# ══════════════════════════════════════════════════════
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
 TAVILY_API_KEY   = os.environ.get("TAVILY_API_KEY", "")
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
@@ -32,12 +72,33 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 GITHUB_RUN_ID    = os.environ.get("GITHUB_RUN_ID", "")
 GITHUB_REPO      = os.environ.get("GITHUB_REPOSITORY", "")
 
+WIDTH, HEIGHT    = 720, 1280
+FPS              = 14
+OUTPUT_VIDEO     = "output_video.mp4"
+THUMBNAIL_FILE   = "thumbnail.png"
+FRAMES_DIR       = Path("frames")
 AUDIO_DIR        = Path("audio_clips")
 AUDIO_CLEAN_DIR  = Path("audio_clean")
 SFX_DIR          = Path("sfx")
 MUSIC_FILE       = "bg_music.mp3"
 WHOOSH_FILE      = SFX_DIR / "whoosh.mp3"
 DING_FILE        = SFX_DIR / "ding.mp3"
+FONT_PATH        = "NotoSans.ttf"
+FONT_BOLD_PATH   = "NotoSans-Bold.ttf"
+CROSSFADE_SECS   = 0.3
+
+BRAND = {
+    "bg_dark":   (8, 4, 20),
+    "bg_mid":    (22, 10, 48),
+    "purple1":   (120, 60, 220),
+    "purple2":   (160, 80, 255),
+    "cyan":      (0, 255, 255),
+    "yellow":    (255, 215, 0),
+    "white":     (255, 255, 255),
+    "glow_p":    (100, 40, 180),
+    "glow_c":    (40, 150, 200),
+    "red":       (255, 40, 40),
+}
 
 TOPICS = [
     "psychology facts mind blowing",
@@ -82,6 +143,42 @@ FALLBACK_SCRIPTS = [
 
 
 # ══════════════════════════════════════════════════════
+# FONTS
+# ══════════════════════════════════════════════════════
+def download_fonts():
+    fonts = {
+        FONT_PATH: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
+        FONT_BOLD_PATH: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf",
+    }
+    for fname, url in fonts.items():
+        if not Path(fname).exists():
+            try:
+                log.info("Downloading font: " + fname)
+                r = requests.get(url, timeout=30)
+                with open(fname, "wb") as f:
+                    f.write(r.content)
+                log.info("Font downloaded: " + fname)
+            except Exception as e:
+                log.warning("Font download failed: " + str(e))
+
+
+def load_font(size, bold=False):
+    path = FONT_BOLD_PATH if bold else FONT_PATH
+    fallbacks = [
+        path,
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    for p in fallbacks:
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+# ══════════════════════════════════════════════════════
 # STEP 1: FETCH FACT CONTEXT (Tavily)
 # ══════════════════════════════════════════════════════
 def fetch_fact_tavily():
@@ -118,15 +215,9 @@ def fetch_fact_tavily():
 
 
 # ══════════════════════════════════════════════════════
-# STEP 2: GENERATE FULL 5-SEGMENT SCRIPT (Groq)
+# STEP 2: GENERATE 5-SEGMENT SCRIPT (Groq)
 # ══════════════════════════════════════════════════════
 def generate_script_with_groq(raw_context):
-    """
-    Generates a longer-form ~60 second script structured as:
-    hook -> fact1 -> fact2 -> fact3 -> outro/CTA
-    Each segment is its own short voiceover line + slide.
-    This naturally produces 55-65 seconds of speech at normal pace.
-    """
     client = Groq(api_key=GROQ_API_KEY)
 
     schema = (
@@ -146,32 +237,25 @@ def generate_script_with_groq(raw_context):
         "}"
     )
 
+    base_system = (
+        "You are a viral YouTube Shorts script writer for Ajeebology Shorts "
+        "(Psychology, Space, Weird Facts channel). Write in Hinglish "
+        "(Hindi+English mix, Roman script). The full script across all 5 "
+        "segments should take about 55-65 seconds to speak aloud at normal "
+        "pace - so each segment should be substantial, not just one short "
+        "phrase. Return ONLY valid JSON, no markdown, no extra text."
+    )
+
     if raw_context:
-        system = (
-            "You are a viral YouTube Shorts script writer for Ajeebology Shorts "
-            "(Psychology, Space, Weird Facts channel). Write in Hinglish "
-            "(Hindi+English mix, Roman script). The full script across all 5 "
-            "segments should take about 55-65 seconds to speak aloud at normal "
-            "pace - so each segment should be substantial, not just one short "
-            "phrase. Return ONLY valid JSON, no markdown, no extra text."
-        )
         user = "Source info: " + str(raw_context[:800]) + "\n\nReturn ONLY this JSON:\n" + schema
     else:
-        system = (
-            "You are a viral YouTube Shorts script writer for Ajeebology Shorts "
-            "(Psychology, Space, Weird Facts channel). Write in Hinglish "
-            "(Hindi+English mix, Roman script). The full script across all 5 "
-            "segments should take about 55-65 seconds to speak aloud at normal "
-            "pace - so each segment should be substantial, not just one short "
-            "phrase. Return ONLY valid JSON, no markdown, no extra text."
-        )
         user = "Create an original mind-blowing multi-fact script. Return ONLY this JSON:\n" + schema
 
     try:
         response = client.chat.completions.create(
             model="llama3-70b-8192",
             messages=[
-                {"role": "system", "content": system},
+                {"role": "system", "content": base_system},
                 {"role": "user", "content": user}
             ],
             temperature=0.85,
@@ -195,8 +279,7 @@ def generate_script_with_groq(raw_context):
 def get_todays_script():
     raw = fetch_fact_tavily()
     try:
-        script = generate_script_with_groq(raw)
-        return script
+        return generate_script_with_groq(raw)
     except Exception as e:
         log.warning("Using fallback script: " + str(e))
         return random.choice(FALLBACK_SCRIPTS)
@@ -217,7 +300,6 @@ async def generate_tts_async(text, path):
 
 
 def generate_raw_voiceover(script):
-    """Generates one raw (unedited) TTS clip per segment."""
     AUDIO_DIR.mkdir(exist_ok=True)
     clips = []
     for i, seg in enumerate(script["segments"]):
@@ -241,28 +323,25 @@ def generate_raw_voiceover(script):
 
 
 # ══════════════════════════════════════════════════════
-# STEP 4: AUDIO CLEANUP — TRIM PAUSES + SPEED UP
+# STEP 4: AUDIO CLEANUP — TRIM ONLY LONG PAUSES (NO forced speedup)
+#
+# FIX APPLIED: the previous version forced atempo=1.06 on TOP of
+# silenceremove, and the silence thresholds were tight (-35dB, short
+# duration triggers). Combined, this over-trimmed audio and made the
+# final video noticeably SHORTER than the scripted ~60 seconds. Now:
+#   - speed defaults to 1.0 (no forced speedup at all)
+#   - thresholds loosened to -40dB and longer minimum durations, so
+#     only genuinely long dead air gets removed, not natural speech gaps
 # ══════════════════════════════════════════════════════
-def clean_audio_clip(raw_path, clean_path, speed=1.06):
-    """
-    Removes long silences from AI-generated voice (a known gTTS/edge-tts
-    problem) using ffmpeg's silenceremove filter, then applies a slight
-    atempo speedup (default 1.06x) to tighten pacing without pitch shift.
-
-    silenceremove logic:
-    - start_periods=1: trim leading silence once
-    - start_duration=0.15: silence shorter than this is kept (avoids
-      cutting natural micro-pauses between words)
-    - start_threshold=-35dB: anything quieter than this counts as silence
-    - The same params applied with stop_periods=-1 trims ALL internal
-      silences longer than the threshold duration, not just leading/trailing
-    """
+def clean_audio_clip(raw_path, clean_path, speed=1.0):
     filter_chain = (
         "silenceremove="
-        "start_periods=1:start_duration=0.15:start_threshold=-35dB:"
-        "stop_periods=-1:stop_duration=0.35:stop_threshold=-35dB,"
-        "atempo=" + str(speed)
+        "start_periods=1:start_duration=0.3:start_threshold=-40dB:"
+        "stop_periods=-1:stop_duration=0.6:stop_threshold=-40dB"
     )
+    if speed and speed != 1.0:
+        filter_chain += ",atempo=" + str(speed)
+
     cmd = [
         "ffmpeg", "-y", "-i", str(raw_path),
         "-af", filter_chain,
@@ -284,6 +363,13 @@ def clean_all_clips(raw_clips):
         clean_path = AUDIO_CLEAN_DIR / ("clean_" + str(i) + ".mp3")
         log.info("Cleaning audio segment " + str(i + 1) + "/" + str(len(raw_clips)))
         clean_audio_clip(raw_path, clean_path)
+
+        raw_dur = get_audio_duration(raw_path)
+        clean_dur = get_audio_duration(clean_path)
+        log.info(
+            "Segment " + str(i) + " duration: raw=" + str(round(raw_dur, 1)) +
+            "s -> cleaned=" + str(round(clean_dur, 1)) + "s"
+        )
         cleaned.append(clean_path)
     return cleaned
 
@@ -301,14 +387,9 @@ def get_audio_duration(path):
 
 
 # ══════════════════════════════════════════════════════
-# STEP 5: SOUND EFFECTS (transition whoosh + word ding)
+# STEP 5: SOUND EFFECTS (best-effort, non-fatal if it fails)
 # ══════════════════════════════════════════════════════
 def download_sfx():
-    """
-    Downloads two short free SFX from Pixabay's open CDN:
-    a whoosh for slide transitions, a soft ding for emphasis beats.
-    If downloads fail, SFX are simply skipped later (non-fatal).
-    """
     SFX_DIR.mkdir(exist_ok=True)
     sfx_targets = {
         WHOOSH_FILE: [
@@ -334,10 +415,14 @@ def download_sfx():
             except Exception as e:
                 log.warning("SFX download failed (" + str(target_path) + "): " + str(e))
                 continue
+    if not WHOOSH_FILE.exists():
+        log.warning("Whoosh SFX unavailable - transitions will be silent (non-fatal)")
+    if not DING_FILE.exists():
+        log.warning("Ding SFX unavailable (non-fatal)")
 
 
 # ══════════════════════════════════════════════════════
-# STEP 6: BACKGROUND MUSIC
+# STEP 6: BACKGROUND MUSIC (best-effort, non-fatal if it fails)
 # ══════════════════════════════════════════════════════
 def download_free_music():
     urls = [
@@ -357,22 +442,15 @@ def download_free_music():
         except Exception as e:
             log.warning("Music URL failed: " + str(e))
             continue
-    log.warning("All music downloads failed - video will proceed without music")
+    log.warning("All music downloads failed - video will proceed without music (non-fatal)")
     return False
 
 
 # ══════════════════════════════════════════════════════
-# STEP 7: CONCAT CLEANED CLIPS WITH SFX TRANSITIONS
+# STEP 7: BUILD VOICE TRACK WITH SFX TRANSITIONS
 # ══════════════════════════════════════════════════════
 def build_voice_track_with_sfx(cleaned_clips):
-    """
-    Concatenates all cleaned voice segments into one track, inserting
-    a short whoosh sound at each segment boundary (if SFX available).
-    Returns path to the combined voice track and list of each segment's
-    actual duration (needed later for video timing in Part 2).
-    """
     has_whoosh = WHOOSH_FILE.exists()
-    segment_durations = [get_audio_duration(c) for c in cleaned_clips]
 
     list_file = "voice_concat_list.txt"
     with open(list_file, "w") as f:
@@ -382,34 +460,25 @@ def build_voice_track_with_sfx(cleaned_clips):
                 f.write("file '" + str(WHOOSH_FILE.resolve()) + "'\n")
 
     combined_voice = "voice_combined.mp3"
-    cmd = [
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-        "-i", list_file, "-c", "copy", combined_voice
-    ]
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", combined_voice]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         log.warning("SFX-interleaved concat failed, falling back to plain concat")
         with open(list_file, "w") as f:
             for clip in cleaned_clips:
                 f.write("file '" + str(clip.resolve()) + "'\n")
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", list_file, "-c", "copy", combined_voice
-        ], capture_output=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", combined_voice],
+            capture_output=True
+        )
 
-    return combined_voice, segment_durations
+    return combined_voice
 
 
 # ══════════════════════════════════════════════════════
-# STEP 8: MIX VOICE + DUCKED MUSIC
+# STEP 8: MIX VOICE + DUCKED MUSIC (best-effort with fallback)
 # ══════════════════════════════════════════════════════
 def mix_voice_and_music(voice_track, output_path="final_audio.mp3"):
-    """
-    Mixes the voice track with background music using sidechaincompress
-    so the music automatically ducks (lowers volume) whenever the voice
-    is speaking, and rises back up in gaps - this is the actual technique
-    professional editors use instead of a flat low music volume.
-    """
     has_music = Path(MUSIC_FILE).exists()
     if not has_music:
         log.info("No music available, using voice track only")
@@ -424,131 +493,110 @@ def mix_voice_and_music(voice_track, output_path="final_audio.mp3"):
         "[voice_main][music_ducked]amix=inputs=2:duration=first:dropout_transition=0[aout]"
     )
     cmd = [
-        "ffmpeg", "-y",
-        "-i", voice_track,
-        "-i", MUSIC_FILE,
-        "-filter_complex", filter_complex,
-        "-map", "[aout]",
-        "-ar", "44100", "-ac", "2",
-        output_path
+        "ffmpeg", "-y", "-i", voice_track, "-i", MUSIC_FILE,
+        "-filter_complex", filter_complex, "-map", "[aout]",
+        "-ar", "44100", "-ac", "2", output_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        log.warning("Sidechain ducking failed, falling back to flat low-volume music mix")
+        log.warning("Sidechain ducking unavailable/failed, using flat low-volume music fallback")
         fallback_filter = (
             "[1:a]aloop=loop=-1:size=2e+09,volume=0.12[music];"
             "[0:a][music]amix=inputs=2:duration=first[aout]"
         )
-        subprocess.run([
+        fb = subprocess.run([
             "ffmpeg", "-y", "-i", voice_track, "-i", MUSIC_FILE,
-            "-filter_complex", fallback_filter,
-            "-map", "[aout]", "-ar", "44100", "-ac", "2",
-            output_path
-        ], capture_output=True)
+            "-filter_complex", fallback_filter, "-map", "[aout]",
+            "-ar", "44100", "-ac", "2", output_path
+        ], capture_output=True, text=True)
+        if fb.returncode != 0 or not Path(output_path).exists():
+            log.warning("Music mix fully failed, using voice-only audio")
+            subprocess.run(["cp", voice_track, output_path], capture_output=True)
     return output_path
 
 
 # ══════════════════════════════════════════════════════
-# STANDALONE TEST ENTRY POINT FOR PART 1
-# (Part 2 will replace this with the full main() that also
-# builds video frames and calls Telegram notification)
+# STEP 8.5: REAL WORD TIMESTAMPS VIA WHISPER
 # ══════════════════════════════════════════════════════
+_whisper_model = None
 
-# ══════════════════════════════════════════════════════
-# PART 2 OF 2 — VISUAL PIPELINE + FINAL ASSEMBLY
-#
-# PLACEMENT: Paste this directly below Part 1 in the same file,
-# REPLACING Part 1's test_audio_pipeline() function and its
-# `if __name__ == "__main__":` block at the bottom. This part
-# adds its own complete main() that uses everything from Part 1.
-# ══════════════════════════════════════════════════════
-
-import math
-from PIL import Image, ImageDraw, ImageFont
-
-WIDTH, HEIGHT  = 720, 1280
-FPS            = 20
-OUTPUT_VIDEO   = "output_video.mp4"
-THUMBNAIL_FILE = "thumbnail.png"
-FRAMES_DIR     = Path("frames")
-FONT_PATH      = "NotoSans.ttf"
-FONT_BOLD_PATH = "NotoSans-Bold.ttf"
-CROSSFADE_SECS = 0.3
-
-BRAND = {
-    "bg_dark":   (8, 4, 20),
-    "bg_mid":    (22, 10, 48),
-    "purple1":   (120, 60, 220),
-    "purple2":   (160, 80, 255),
-    "cyan":      (0, 255, 255),
-    "yellow":    (255, 215, 0),
-    "white":     (255, 255, 255),
-    "glow_p":    (100, 40, 180),
-    "glow_c":    (40, 150, 200),
-    "red":       (255, 40, 40),
-}
+def get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        import whisper
+        log.info("Loading Whisper model (tiny)...")
+        _whisper_model = whisper.load_model("tiny")
+    return _whisper_model
 
 
-# ══════════════════════════════════════════════════════
-# FONTS
-# ══════════════════════════════════════════════════════
-def download_fonts():
-    fonts = {
-        FONT_PATH: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
-        FONT_BOLD_PATH: "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf",
-    }
-    for fname, url in fonts.items():
-        if not Path(fname).exists():
-            try:
-                log.info("Downloading font: " + fname)
-                r = requests.get(url, timeout=30)
-                with open(fname, "wb") as f:
-                    f.write(r.content)
-            except Exception as e:
-                log.warning("Font download failed: " + str(e))
+def transcribe_word_timestamps(audio_path):
+    try:
+        model = get_whisper_model()
+        result = model.transcribe(
+            str(audio_path), word_timestamps=True, language="hi", fp16=False
+        )
+        words = []
+        for segment in result.get("segments", []):
+            for w in segment.get("words", []):
+                words.append({
+                    "word": w["word"].strip(),
+                    "start": float(w["start"]),
+                    "end": float(w["end"])
+                })
+        if not words:
+            raise ValueError("Whisper returned no word timestamps")
+        log.info("Whisper transcribed " + str(len(words)) + " words")
+        return words
+    except Exception as e:
+        log.warning("Whisper transcription failed: " + str(e) + " - using fallback estimate")
+        return None
 
 
-def load_font(size, bold=False):
-    path = FONT_BOLD_PATH if bold else FONT_PATH
-    fallbacks = [
-        path,
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ]
-    for p in fallbacks:
-        try:
-            return ImageFont.truetype(p, size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
-
-
-# ══════════════════════════════════════════════════════
-# WORD TIMELINE (karaoke approximation, weighted by length)
-# ══════════════════════════════════════════════════════
-def build_word_timeline(text, total_duration):
-    words = text.split()
-    if not words:
+def build_word_timeline_fallback(script, total_duration):
+    all_words = []
+    for seg in script["segments"]:
+        all_words.extend(seg["text"].split())
+    if not all_words:
         return []
-    weights = [max(len(w), 2) for w in words]
+    weights = [max(len(w), 2) for w in all_words]
     total_weight = sum(weights)
     timeline = []
     t_cursor = 0.0
-    for w, wt in zip(words, weights):
+    for w, wt in zip(all_words, weights):
         dur = (wt / total_weight) * total_duration
         timeline.append({"word": w, "start": t_cursor, "end": t_cursor + dur})
         t_cursor += dur
     return timeline
 
 
-def current_word_index(timeline, current_time):
+def current_word_index_by_time(timeline, current_time):
     for i, item in enumerate(timeline):
         if item["start"] <= current_time < item["end"]:
             return i
     if timeline and current_time >= timeline[-1]["end"]:
         return len(timeline) - 1
     return -1
+
+
+def map_global_to_local_index(global_active_idx, global_timeline, local_words):
+    if global_active_idx < 0 or global_active_idx >= len(global_timeline):
+        return -1
+    if not local_words:
+        return -1
+
+    first_word_clean = local_words[0].lower().strip(".,!?\"'")
+    search_start = max(0, global_active_idx - len(local_words) - 5)
+    search_end = min(len(global_timeline), global_active_idx + 5)
+
+    for offset_guess in range(search_start, search_end):
+        gw = global_timeline[offset_guess]["word"].lower().strip(".,!?\"'")
+        if gw == first_word_clean:
+            local_idx = global_active_idx - offset_guess
+            if 0 <= local_idx < len(local_words):
+                return local_idx
+
+    progress_ratio = global_active_idx / max(len(global_timeline) - 1, 1)
+    return min(len(local_words) - 1, int(progress_ratio * len(local_words)))
 
 
 # ══════════════════════════════════════════════════════
@@ -575,8 +623,7 @@ def draw_stars_animated(draw, frame, count=130):
         twinkle = abs(math.sin(frame * 0.08 + phase))
         brightness = int(90 + 165 * twinkle)
         r = max(1, int(base_r * (0.5 + twinkle * 0.5)))
-        draw.ellipse([x-r, y-r, x+r, y+r],
-                     fill=(brightness, int(brightness*0.85), 255))
+        draw.ellipse([x-r, y-r, x+r, y+r], fill=(brightness, int(brightness*0.85), 255))
     random.seed()
 
 
@@ -607,27 +654,14 @@ def draw_particles(draw, frame, count=22):
 
 
 def apply_ken_burns(img, progress, zoom_start=1.0, zoom_end=1.08, pan_px=20):
-    """
-    Applies a slow zoom + slight pan across the duration of a slide
-    (progress 0.0 -> 1.0). This is THE single biggest 'looks professionally
-    edited' signal for static-content video - real editors almost never
-    leave a frame perfectly still.
-    """
     zoom = zoom_start + (zoom_end - zoom_start) * progress
-    new_w = int(WIDTH * zoom)
-    new_h = int(HEIGHT * zoom)
+    new_w, new_h = int(WIDTH * zoom), int(HEIGHT * zoom)
     resized = img.resize((new_w, new_h), Image.LANCZOS)
-
     pan_x = int(pan_px * progress)
     pan_y = int(pan_px * 0.5 * progress)
-
-    left = (new_w - WIDTH) // 2 + pan_x
-    top = (new_h - HEIGHT) // 2 + pan_y
-    left = max(0, min(left, new_w - WIDTH))
-    top = max(0, min(top, new_h - HEIGHT))
-
-    cropped = resized.crop((left, top, left + WIDTH, top + HEIGHT))
-    return cropped
+    left = max(0, min((new_w - WIDTH) // 2 + pan_x, new_w - WIDTH))
+    top = max(0, min((new_h - HEIGHT) // 2 + pan_y, new_h - HEIGHT))
+    return resized.crop((left, top, left + WIDTH, top + HEIGHT))
 
 
 # ══════════════════════════════════════════════════════
@@ -681,7 +715,6 @@ def wrap_text(text, font, max_width):
         lines.append(current)
     return lines
 
-
 def wrap_words_with_index(words, font, max_width, draw):
     lines, current_line, current_width = [], [], 0
     space_w, _ = get_text_size(draw, " ", font)
@@ -702,7 +735,7 @@ def wrap_words_with_index(words, font, max_width, draw):
 
 def draw_karaoke_paragraph(draw, top_y, words, max_width, font,
                             active_index, highlight_color,
-                            white_color=(255, 255, 255), line_height=50,
+                            white_color=(255, 255, 255), line_height=48,
                             center_x=WIDTH // 2, stroke=3):
     lines = wrap_words_with_index(words, font, max_width, draw)
     space_w, _ = get_text_size(draw, " ", font)
@@ -714,11 +747,9 @@ def draw_karaoke_paragraph(draw, top_y, words, max_width, font,
         for word, idx in line:
             ww, _ = get_text_size(draw, word, font)
             if idx == active_index:
-                draw_glowing_text(draw, (x, y), word, font,
-                                  highlight_color, highlight_color, glow_range=2)
+                draw_glowing_text(draw, (x, y), word, font, highlight_color, highlight_color, glow_range=2)
             else:
-                draw_outlined_text(draw, (x, y), word, font,
-                                   white_color, (0, 0, 0), stroke=stroke)
+                draw_outlined_text(draw, (x, y), word, font, white_color, (0, 0, 0), stroke=stroke)
             x += ww + space_w
         y += line_height
     return y - top_y
@@ -729,9 +760,8 @@ def draw_karaoke_paragraph(draw, top_y, words, max_width, font,
 # ══════════════════════════════════════════════════════
 def create_base_frame(frame_num, slide_index, total_slides,
                        title, body_text, category,
-                       word_timeline, current_time, slide_progress,
+                       global_word_timeline, global_time, slide_progress,
                        show_cta):
-    """Renders one complete frame (background + UI + karaoke text + CTA)."""
     base = Image.new("RGB", (int(WIDTH*1.1), int(HEIGHT*1.1)), color=BRAND["bg_dark"])
     draw_gradient(base)
     bdraw = ImageDraw.Draw(base)
@@ -741,7 +771,6 @@ def create_base_frame(frame_num, slide_index, total_slides,
 
     img = apply_ken_burns(base, slide_progress)
     draw = ImageDraw.Draw(img)
-
     pad = 40
 
     pulse = 0.7 + 0.3 * math.sin(frame_num * 0.15)
@@ -754,11 +783,9 @@ def create_base_frame(frame_num, slide_index, total_slides,
             draw.ellipse([cx-r-thickness*3, cy-r-thickness*3, cx+r+thickness*3, cy+r+thickness*3],
                          outline=ocol, width=1)
 
-    # Header
     draw.rectangle([0, 0, WIDTH, 85], fill=(4, 2, 12))
     draw.line([(0, 85), (WIDTH, 85)], fill=BRAND["cyan"], width=2)
-    font_top = load_font(24, bold=True)
-    draw.text((pad, 28), "AJEEBOLOGY STUDIO", font=font_top, fill=BRAND["cyan"])
+    draw.text((pad, 28), "AJEEBOLOGY STUDIO", font=load_font(24, bold=True), fill=BRAND["cyan"])
 
     rec_blink = abs(math.sin(frame_num * 0.3))
     rec_alpha = 0.4 + 0.6 * rec_blink
@@ -766,7 +793,6 @@ def create_base_frame(frame_num, slide_index, total_slides,
     draw.ellipse([WIDTH-95, 30, WIDTH-75, 50], fill=rec_color)
     draw.text((WIDTH-65, 30), "LIVE", font=load_font(20, bold=True), fill=BRAND["white"])
 
-    # Slide dots
     dot_y = 110
     spacing = 28
     total_w = (total_slides - 1) * spacing
@@ -780,7 +806,6 @@ def create_base_frame(frame_num, slide_index, total_slides,
         else:
             draw.ellipse([x-5, dot_y-5, x+5, dot_y+5], fill=(60, 40, 100))
 
-    # Category badge
     font_badge = load_font(22, bold=True)
     cat_icons = {"Psychology": "BRAIN", "Space": "SPACE", "Science": "SCIENCE",
                 "Animals": "NATURE", "History": "HISTORY"}
@@ -790,7 +815,6 @@ def create_base_frame(frame_num, slide_index, total_slides,
     draw.rounded_rectangle([bx-15, by-8, bx+bw+15, by+bh+8], radius=15, fill=BRAND["purple1"])
     draw.text((bx, by), badge_text, font=font_badge, fill=BRAND["cyan"])
 
-    # Title
     font_title = load_font(46, bold=True)
     title_lines = wrap_text(title, font_title, WIDTH - pad*2)
     title_y = 195
@@ -809,7 +833,6 @@ def create_base_frame(frame_num, slide_index, total_slides,
     if line_end > pad:
         draw.line([(pad, div_y), (line_end, div_y)], fill=BRAND["cyan"], width=3)
 
-    # Karaoke body card
     font_body = load_font(34, bold=True)
     words = body_text.split()
     box_top = div_y + 24
@@ -826,12 +849,12 @@ def create_base_frame(frame_num, slide_index, total_slides,
     draw.rounded_rectangle([pad, box_top, WIDTH-pad, box_top+body_height], radius=20,
                            outline=(0, border_pulse, 255), width=3)
 
-    active_idx = current_word_index(word_timeline, current_time)
+    global_active_idx = current_word_index_by_time(global_word_timeline, global_time)
+    local_active_idx = map_global_to_local_index(global_active_idx, global_word_timeline, words)
     highlight = BRAND["yellow"] if (slide_index % 2 == 0) else BRAND["cyan"]
     draw_karaoke_paragraph(draw, box_top + box_inner_pad, words, max_text_width,
-                           font_body, active_idx, highlight, BRAND["white"], line_height)
+                           font_body, local_active_idx, highlight, BRAND["white"], line_height)
 
-    # Delayed CTA — only fades in during final slide's last portion
     if show_cta > 0:
         cta_top = HEIGHT - 210
         cta_alpha = show_cta
@@ -868,30 +891,30 @@ def draw_bottom_progress_bar(img, overall_progress):
 
 
 # ══════════════════════════════════════════════════════
-# SLIDE FRAME GENERATION (with crossfade overlap)
+# SLIDE FRAME GENERATION (audio-duration-driven, fixes cutoff bug)
 # ══════════════════════════════════════════════════════
 def create_slide_frames(slide_index, total_slides, title, body_text,
                          category, duration_secs, total_video_duration,
-                         elapsed_before):
+                         elapsed_before, global_word_timeline):
     total_frames = max(1, int(duration_secs * FPS))
-    word_timeline = build_word_timeline(body_text, duration_secs)
     is_last_slide = (slide_index == total_slides - 1)
     paths = []
 
     for f in range(total_frames):
-        current_time = f / FPS
+        local_time = f / FPS
+        global_time = elapsed_before + local_time
         slide_progress = f / max(total_frames - 1, 1)
-        overall_progress = (elapsed_before + current_time) / total_video_duration
+        overall_progress = global_time / total_video_duration
 
         show_cta = 0.0
         if is_last_slide:
             cta_window = min(3.0, duration_secs * 0.4)
-            time_remaining = duration_secs - current_time
+            time_remaining = duration_secs - local_time
             if time_remaining <= cta_window:
                 show_cta = min(1.0, (cta_window - time_remaining) / 0.6)
 
         img = create_base_frame(f, slide_index, total_slides, title, body_text,
-                                category, word_timeline, current_time,
+                                category, global_word_timeline, global_time,
                                 slide_progress, show_cta)
         img = draw_bottom_progress_bar(img, overall_progress)
 
@@ -902,14 +925,24 @@ def create_slide_frames(slide_index, total_slides, title, body_text,
     return paths
 
 
-def create_all_slides(script, segment_durations):
+def create_all_slides(script, final_audio_duration, global_word_timeline):
+    """
+    Frame timing is driven by the FINAL MIXED AUDIO duration (real,
+    ffprobe-measured), not estimated segment durations. This guarantees
+    total video length always matches total audio length exactly.
+    """
     FRAMES_DIR.mkdir(exist_ok=True)
     category = script.get("category", "Facts")
     segments = script["segments"]
-    total_video_duration = sum(segment_durations)
+    n = len(segments)
+
+    text_lengths = [len(seg["text"]) for seg in segments]
+    total_len = sum(text_lengths) if sum(text_lengths) > 0 else 1
+    slide_durations = [max(1.5, (tl / total_len) * final_audio_duration) for tl in text_lengths]
+    drift = final_audio_duration - sum(slide_durations)
+    slide_durations[-1] += drift
 
     slide_titles = []
-    n = len(segments)
     for i in range(n):
         if i == 0:
             slide_titles.append(script["title"])
@@ -922,12 +955,12 @@ def create_all_slides(script, segment_durations):
     thumbnail = None
     elapsed = 0.0
 
-    for i, (seg, dur) in enumerate(zip(segments, segment_durations)):
+    for i, (seg, dur) in enumerate(zip(segments, slide_durations)):
         log.info("Rendering slide " + str(i+1) + "/" + str(n) +
-                 " (" + str(round(dur, 1)) + "s)")
+                 " (" + str(round(dur, 1)) + "s, global start " + str(round(elapsed, 1)) + "s)")
         frame_paths = create_slide_frames(
             i, n, slide_titles[i], seg["text"], category,
-            dur, total_video_duration, elapsed
+            dur, final_audio_duration, elapsed, global_word_timeline
         )
         all_frame_paths.append(frame_paths)
         if i == 0 and frame_paths:
@@ -941,18 +974,11 @@ def create_all_slides(script, segment_durations):
 # CROSSFADE BLENDING BETWEEN SLIDE BOUNDARIES
 # ══════════════════════════════════════════════════════
 def apply_crossfades(slide_frame_groups):
-    """
-    Blends the last N frames of each slide with the first N frames of
-    the next slide using alpha compositing, replacing the hard-cut
-    boundary frames with smooth crossfade frames. Modifies files in
-    place and returns the final flat ordered list of all frame paths.
-    """
     crossfade_frames = max(1, int(CROSSFADE_SECS * FPS))
 
     for i in range(len(slide_frame_groups) - 1):
         current_group = slide_frame_groups[i]
         next_group = slide_frame_groups[i + 1]
-
         n = min(crossfade_frames, len(current_group), len(next_group))
         if n < 1:
             continue
@@ -961,7 +987,6 @@ def apply_crossfades(slide_frame_groups):
             alpha = (k + 1) / (n + 1)
             out_idx = len(current_group) - n + k
             in_idx = k
-
             try:
                 img_out = Image.open(str(current_group[out_idx])).convert("RGB")
                 img_in = Image.open(str(next_group[in_idx])).convert("RGB")
@@ -1011,9 +1036,8 @@ def build_video(all_frames, final_audio_path):
     log.info("Video built successfully!")
     return True
 
-
 # ══════════════════════════════════════════════════════
-# TELEGRAM NOTIFICATION (unchanged from earlier versions)
+# TELEGRAM NOTIFICATION
 # ══════════════════════════════════════════════════════
 def generate_youtube_metadata(script):
     english_title = script.get("english_title", script["title"] + " | Ajeebology Shorts")
@@ -1101,10 +1125,35 @@ def notify_telegram(script, video_ok):
 
 
 # ══════════════════════════════════════════════════════
-# MAIN — TIES PART 1 (AUDIO) + PART 2 (VIDEO) TOGETHER
+# CLEANUP
+# ══════════════════════════════════════════════════════
+def cleanup_temp_assets():
+    import shutil
+    targets_dirs = [FRAMES_DIR, AUDIO_DIR, AUDIO_CLEAN_DIR, SFX_DIR]
+    targets_files = [
+        MUSIC_FILE, "voice_concat_list.txt", "voice_combined.mp3",
+        "final_audio.mp3", "frame_list.txt", FONT_PATH, FONT_BOLD_PATH
+    ]
+    for d in targets_dirs:
+        try:
+            if Path(d).exists():
+                shutil.rmtree(d)
+        except Exception as e:
+            log.warning("Cleanup failed for dir " + str(d) + ": " + str(e))
+    for f in targets_files:
+        try:
+            if Path(f).exists():
+                Path(f).unlink()
+        except Exception as e:
+            log.warning("Cleanup failed for file " + str(f) + ": " + str(e))
+    log.info("Temporary assets cleaned up")
+
+
+# ══════════════════════════════════════════════════════
+# MAIN
 # ══════════════════════════════════════════════════════
 def main():
-    log.info("AJEEBOLOGY SHORTS AGENT STARTED (full production pipeline)")
+    log.info("AJEEBOLOGY SHORTS AGENT STARTED (master consolidated pipeline)")
 
     log.info("STEP 1: Downloading fonts...")
     download_fonts()
@@ -1116,28 +1165,34 @@ def main():
     log.info("STEP 3: Generating raw TTS per segment...")
     raw_clips = generate_raw_voiceover(script)
 
-    log.info("STEP 4: Cleaning audio (trim pauses + speed up)...")
+    log.info("STEP 4: Cleaning audio (trim long pauses only, no forced speedup)...")
     cleaned_clips = clean_all_clips(raw_clips)
-    segment_durations = [get_audio_duration(c) for c in cleaned_clips]
-    log.info("Segment durations: " + str([round(d, 1) for d in segment_durations]))
-    log.info("Total speech duration: " + str(round(sum(segment_durations), 1)) + "s")
+    total_cleaned = sum(get_audio_duration(c) for c in cleaned_clips)
+    log.info("Total cleaned voice duration (before SFX/music): " + str(round(total_cleaned, 1)) + "s")
 
-    log.info("STEP 5: Downloading SFX...")
+    log.info("STEP 5: Downloading SFX (best-effort)...")
     download_sfx()
 
-    log.info("STEP 6: Downloading background music...")
+    log.info("STEP 6: Downloading background music (best-effort)...")
     download_free_music()
 
     log.info("STEP 7: Building voice track with SFX transitions...")
-    voice_track, sfx_segment_durations = build_voice_track_with_sfx(cleaned_clips)
+    voice_track = build_voice_track_with_sfx(cleaned_clips)
+    voice_track_duration = get_audio_duration(voice_track)
+    log.info("Voice track duration (with SFX gaps): " + str(round(voice_track_duration, 1)) + "s")
 
     log.info("STEP 8: Mixing voice + ducked music...")
     final_audio = mix_voice_and_music(voice_track)
     final_audio_duration = get_audio_duration(final_audio)
     log.info("FINAL AUDIO DURATION: " + str(round(final_audio_duration, 1)) + "s")
 
+    log.info("STEP 8.5: Transcribing real word timestamps with Whisper...")
+    global_word_timeline = transcribe_word_timestamps(final_audio)
+    if global_word_timeline is None:
+        global_word_timeline = build_word_timeline_fallback(script, final_audio_duration)
+
     log.info("STEP 9: Rendering animated Ken Burns + karaoke frames...")
-    slide_frame_groups, thumbnail = create_all_slides(script, segment_durations)
+    slide_frame_groups, thumbnail = create_all_slides(script, final_audio_duration, global_word_timeline)
 
     if thumbnail:
         thumbnail.save(THUMBNAIL_FILE, "PNG")
@@ -1145,13 +1200,17 @@ def main():
 
     log.info("STEP 10: Applying crossfade transitions...")
     all_frames = apply_crossfades(slide_frame_groups)
-    log.info("Total frames: " + str(len(all_frames)))
+    log.info("Total frames: " + str(len(all_frames)) +
+             " (expected video length: " + str(round(len(all_frames)/FPS, 1)) + "s)")
 
     log.info("STEP 11: Building final video...")
     video_ok = build_video(all_frames, final_audio)
 
     log.info("STEP 12: Sending Telegram notification...")
     notify_telegram(script, video_ok)
+
+    log.info("STEP 13: Cleaning up temporary assets...")
+    cleanup_temp_assets()
 
     if video_ok:
         log.info("PIPELINE COMPLETE!")
