@@ -2,7 +2,7 @@ name: YouTube Shorts Automation Agent
 
 on:
   schedule:
-    - cron: '30 9 * * *'  # Daily 2:30 PM PKT (9:30 AM UTC)
+    - cron: '45 8 * * *'
   workflow_dispatch:
 
 jobs:
