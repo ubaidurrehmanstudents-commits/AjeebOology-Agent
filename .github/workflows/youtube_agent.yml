@@ -2,7 +2,7 @@ name: 🤖 Ajeebologyshorts Pro - Daily AI Shorts
 
 on:
   schedule:
-    - cron: '0 11 * * *'   # 4:00 PM PKT daily
+    - cron: '0 11 * * *'
   workflow_dispatch:
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
           EOF
 
       - name: 🚀 Generate Professional Short + Metadata
-        run: python scripts/generate_short_pro.py
+        run: python youtube_agent.py
 
       - name: 📤 Upload Video
         uses: actions/upload-artifact@v4
