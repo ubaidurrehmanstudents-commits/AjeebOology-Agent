@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Ajeebologyshorts - Professional Monetizable YouTube Shorts Generator
-Single File Version - Human-like voice + Full Telegram Metadata
 """
 
 import os
@@ -22,7 +21,7 @@ from moviepy.video.fx.all import fadein, fadeout
 from moviepy.audio.fx.all import audio_normalize
 
 # ==================== CONFIG ====================
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent
 OUTPUT_DIR = BASE_DIR / "output" / "videos"
 AUDIO_DIR = BASE_DIR / "output" / "audio"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,10 +42,8 @@ TOPICS = [
     "The surprising truth about first impressions"
 ]
 
-# Human-like Indian Voice (Best for monetization)
 VOICE = "en-IN-NeerjaNeural"
-SPEED = "+4%"                    # Slightly slower = more natural
-
+SPEED = "+4%"
 VIDEO_DURATION = 50
 RESOLUTION = (1080, 1920)
 FPS = 30
@@ -56,33 +53,25 @@ BG_COLOR = (12, 12, 28)
 
 load_dotenv()
 
-# ==================== 1. GENERATE SCRIPT + METADATA ====================
+# ==================== SCRIPT + METADATA ====================
 def generate_script_and_metadata(topic: str):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        script = f"Here are 5 mind-blowing facts about {topic}. The first one will shock you..."
-        return script, f"You Won't Believe These Facts About {topic}", script, "#Shorts #Psychology", ["psychology", "facts"]
+        script = f"Here are 5 mind-blowing facts about {topic}."
+        return script, f"You Won't Believe These Facts About {topic}", script, "#Shorts", ["facts"]
 
     client = groq.Groq(api_key=api_key)
-
-    prompt = f"""You are a professional YouTube Shorts scriptwriter for Ajeebologyshorts.
-
-Create:
-1. A highly engaging 48-52 second script (strong hook + 5-6 facts + CTA)
-2. A curiosity-driven title (under 60 characters)
-3. A YouTube description (2-3 lines)
-4. 4-5 relevant hashtags
-5. 8-10 tags
+    prompt = f"""Create a YouTube Shorts script + metadata for Ajeebologyshorts.
 
 Topic: {topic}
 
-Return ONLY in this exact JSON format:
+Return ONLY this JSON:
 {{
-  "script": "...",
-  "title": "...",
-  "description": "...",
-  "hashtags": "...",
-  "tags": ["tag1", "tag2"]
+  "script": "full script here",
+  "title": "curiosity title",
+  "description": "description",
+  "hashtags": "#Shorts #Psychology",
+  "tags": ["psychology", "facts"]
 }}"""
 
     try:
@@ -90,16 +79,14 @@ Return ONLY in this exact JSON format:
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
-            temperature=0.75,
         )
-        content = response.choices[0].message.content.strip()
-        data = json.loads(content)
+        data = json.loads(response.choices[0].message.content.strip())
         return data["script"], data["title"], data["description"], data["hashtags"], data["tags"]
     except:
-        script = f"Here are 5 shocking facts about {topic}. Number one will blow your mind..."
-        return script, f"You Won't Believe These Facts About {topic}", script, "#Shorts #Psychology", ["psychology", "facts"]
+        script = f"Here are 5 shocking facts about {topic}."
+        return script, f"You Won't Believe These Facts About {topic}", script, "#Shorts", ["facts"]
 
-# ==================== 2. HUMAN-LIKE VOICEOVER ====================
+# ==================== VOICEOVER ====================
 async def generate_voiceover(text: str, path: str):
     communicate = edge_tts.Communicate(text, VOICE, rate=SPEED)
     await communicate.save(path)
@@ -110,27 +97,25 @@ def create_voiceover(text: str) -> str:
     asyncio.run(generate_voiceover(text, path))
     return path
 
-# ==================== 3. STOCK FOOTAGE ====================
+# ==================== STOCK FOOTAGE ====================
 def get_stock_footage(max_clips=5):
     key = os.getenv("PEXELS_API_KEY")
-    if not key:
-        return []
+    if not key: return []
     headers = {"Authorization": key}
-    keywords = ["brain", "space", "mind", "stars", "psychology", "thinking", "mystery"]
+    keywords = ["brain", "space", "mind", "stars", "psychology"]
     urls = []
-    for kw in random.sample(keywords, 5):
+    for kw in random.sample(keywords, 4):
         try:
             r = requests.get("https://api.pexels.com/videos/search", headers=headers,
-                             params={"query": kw, "per_page": 3, "orientation": "portrait"}, timeout=12)
+                             params={"query": kw, "per_page": 3, "orientation": "portrait"}, timeout=10)
             if r.status_code == 200:
                 for v in r.json().get("videos", []):
                     if v.get("video_files"):
                         urls.append(v["video_files"][0]["link"])
-        except:
-            continue
+        except: continue
     return list(dict.fromkeys(urls))[:max_clips]
 
-# ==================== 4. KEN BURNS EFFECT ====================
+# ==================== KEN BURNS ====================
 def apply_ken_burns(clip, duration):
     def zoom(get_frame, t):
         frame = get_frame(t)
@@ -142,8 +127,8 @@ def apply_ken_burns(clip, duration):
         return frame[y:y+h, x:x+w]
     return clip.fl(zoom).set_duration(duration)
 
-# ==================== 5. BACKGROUND MUSIC ====================
-def get_music():
+# ==================== MUSIC ====================
+def get_music(): 
     return random.choice([
         "https://cdn.pixabay.com/audio/2022/05/27/audio_1808b9a0b2.mp3",
         "https://cdn.pixabay.com/audio/2022/03/15/audio_8f8b9a0b2.mp3"
@@ -152,18 +137,15 @@ def get_music():
 def download_music(url):
     path = str(AUDIO_DIR / "bg_music.mp3")
     try:
-        r = requests.get(url, timeout=15)
-        with open(path, "wb") as f:
-            f.write(r.content)
+        r = requests.get(url, timeout=12)
+        with open(path, "wb") as f: f.write(r.content)
         return path
-    except:
-        return None
+    except: return None
 
-# ==================== 6. KARAOKE CAPTIONS ====================
+# ==================== KARAOKE CAPTIONS ====================
 def create_karaoke_captions(script, duration):
     words = script.split()
-    if not words:
-        return []
+    if not words: return []
     clips = []
     wps = len(words) / duration
     time = 0
@@ -182,14 +164,11 @@ def create_karaoke_captions(script, duration):
         time += dur
     return clips
 
-# ==================== 7. CREATE PROFESSIONAL VIDEO ====================
-def create_video(script, voice_path, topic, title):
+# ==================== CREATE VIDEO ====================
+def create_video(script, voice_path, topic):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = str(OUTPUT_DIR / f"ajeebologyshorts_pro_{ts}.mp4")
 
-    print("🎬 Creating professional short...")
-
-    # Visuals
     urls = get_stock_footage()
     segs = []
     for i, url in enumerate(urls):
@@ -199,8 +178,7 @@ def create_video(script, voice_path, topic, title):
             if i > 0: c = fadein(c, 0.4)
             if i < len(urls)-1: c = fadeout(c, 0.4)
             segs.append(c)
-        except:
-            continue
+        except: continue
     if not segs:
         segs = [ColorClip(size=RESOLUTION, color=BG_COLOR, duration=VIDEO_DURATION)]
 
@@ -210,21 +188,17 @@ def create_video(script, voice_path, topic, title):
     elif video.duration < VIDEO_DURATION:
         video = video.loop(duration=VIDEO_DURATION)
 
-    # Audio
     voice = audio_normalize(AudioFileClip(voice_path))
     music_path = download_music(get_music())
     if music_path and os.path.exists(music_path):
         bg = AudioFileClip(music_path).volumex(0.18)
-        if bg.duration < VIDEO_DURATION:
-            bg = bg.loop(duration=VIDEO_DURATION)
-        else:
-            bg = bg.subclip(0, VIDEO_DURATION)
+        if bg.duration < VIDEO_DURATION: bg = bg.loop(duration=VIDEO_DURATION)
+        else: bg = bg.subclip(0, VIDEO_DURATION)
         final_audio = CompositeAudioClip([bg, voice])
     else:
         final_audio = voice
     video = video.set_audio(final_audio)
 
-    # Captions + Branding
     caps = create_karaoke_captions(script, VIDEO_DURATION)
     brand = TextClip("🧠 AJEEBOLOGYSHORTS", fontsize=36, color=BRAND_COLOR,
                      font=CAPTION_FONT, stroke_color="black", stroke_width=2
@@ -238,64 +212,41 @@ def create_video(script, voice_path, topic, title):
                           bitrate="8500k", preset="fast", threads=4, logger=None)
     return output_path
 
-# ==================== 8. SEND RICH TELEGRAM MESSAGE ====================
-def send_telegram(title, description, hashtags, tags, video_path, run_id):
+# ==================== TELEGRAM ====================
+def send_telegram(title, description, hashtags, tags, run_id):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        return
+    if not token or not chat_id: return
 
-    artifact_link = f"https://github.com/ubaidurrehmn/AjeebOology-Agent/actions/runs/{run_id}/artifacts"
+    link = f"https://github.com/ubaidurrehmn/AjeebOology-Agent/actions/runs/{run_id}/artifacts"
+    msg = f"""🎬 <b>New Professional Short Ready!</b>
 
-    message = f"""🎬 <b>New Professional Short Ready!</b>
+<b>Title:</b> {title}
 
-<b>📌 Title:</b> {title}
-
-<b>📝 Description:</b>
+<b>Description:</b>
 {description}
 
-<b>🔖 Hashtags:</b> {hashtags}
+<b>Hashtags:</b> {hashtags}
 
-<b>🏷️ Tags:</b> {', '.join(tags)}
+<b>Tags:</b> {', '.join(tags)}
 
-<b>📥 Download Video:</b> {artifact_link}
+<b>Download:</b> {link}"""
 
-✅ Ready to upload to YouTube
-"""
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=15)
-    print("✅ Rich Telegram notification sent")
+    requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                  json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=15)
 
 # ==================== MAIN ====================
 def main():
-    print("=" * 65)
-    print("🚀 AJEEBOLOGYSHORTS - PROFESSIONAL MONETIZABLE GENERATOR")
-    print("=" * 65)
-
+    print("🚀 Starting Professional Shorts Generator...")
     topic = random.choice(TOPICS)
-    print(f"📌 Topic: {topic}")
-
     script, title, desc, hashtags, tags = generate_script_and_metadata(topic)
-    print(f"📝 Title: {title}")
-
     voice_path = create_voiceover(script)
-    print("🎙️ Human-like voice created")
+    video_path = create_video(script, voice_path, topic)
 
-    video_path = create_video(script, voice_path, topic, title)
-
-    # Save metadata
-    with open(OUTPUT_DIR / "latest.txt", "w") as f:
-        f.write(f"Title: {title}\nScript: {script}\nFile: {video_path}\n")
-
-    # Get GitHub Run ID
     run_id = os.getenv("GITHUB_RUN_ID", "unknown")
+    send_telegram(title, desc, hashtags, tags, run_id)
 
-    # Send Telegram with full metadata
-    send_telegram(title, desc, hashtags, tags, video_path, run_id)
-
-    print("\n🎉 PROFESSIONAL SHORT + METADATA SENT TO TELEGRAM!")
-    print("=" * 65)
+    print("✅ Done! Check Telegram.")
 
 if __name__ == "__main__":
     main()
