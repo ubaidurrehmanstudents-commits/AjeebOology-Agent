@@ -2,16 +2,16 @@ name: 🤖 Ajeebologyshorts Pro - Daily AI Shorts
 
 on:
   schedule:
-    - cron: '0 11 * * *'        # Every day at 4:00 PM PKT
-  workflow_dispatch:            # Manual run button
+    - cron: '0 11 * * *'   # 4:00 PM PKT daily
+  workflow_dispatch:
 
 jobs:
   generate-pro-short:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
       - name: 🐍 Setup Python
@@ -19,37 +19,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 🔧 Install System Dependencies
+      - name: 🔧 Install Dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-
-      - name: 📦 Install Python Packages
-        run: |
           pip install -q moviepy edge-tts requests python-dotenv groq Pillow
 
-      - name: 🔐 Load GitHub Secrets
+      - name: 🔐 Load Secrets
         run: |
           cat > .env << 'EOF'
           GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
-          TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
           TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           PEXELS_API_KEY=${{ secrets.PEXELS_API_KEY || '' }}
           EOF
 
-      - name: 🚀 Run Professional Shorts Generator
+      - name: 🚀 Generate Professional Short + Metadata
         run: python scripts/generate_short_pro.py
 
-      - name: 📤 Upload Video Artifact
+      - name: 📤 Upload Video
         uses: actions/upload-artifact@v4
         with:
-          name: ajeebologyshorts-pro-video
+          name: ajeebologyshorts-pro
           path: output/videos/*.mp4
           retention-days: 30
-
-      - name: 📱 Send Telegram Notification
-        run: python scripts/send_telegram_notification.py
 
       - name: 🧹 Cleanup
         if: always()
