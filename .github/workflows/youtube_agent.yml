@@ -2,6 +2,7 @@ name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
+    # Runs at 1:00 PM PKT daily (8:00 AM UTC, PKT = UTC+5)
     - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
@@ -17,65 +18,95 @@ env:
 jobs:
   build-and-deliver:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 30
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
+      with:
+        fetch-depth: 1
+    
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-
-    # No pip cache – ensures fresh install
-    - name: Cache downloaded assets (images, music)
-      uses: actions/cache@v4
-      with:
-        path: /tmp/ajeebology/assets
-        key: ajeebology-assets-v1
-        restore-keys: ajeebology-assets-
-
+    
     - name: Install system dependencies
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq --no-install-recommends \
+        sudo apt-get install -y -qq \
           ffmpeg \
-          libsm6 libxext6 libgl1 libfontconfig1 libxrender1 \
-          fonts-dejavu-core fonts-liberation fonts-freefont-ttf fonts-noto-core
-
-    - name: Install Python dependencies (force moviepy)
-      run: |
-        pip install --upgrade pip setuptools wheel
-        pip install --no-cache-dir -r requirements.txt
-        # Verify moviepy is installed
-        python -c "import moviepy; print('moviepy version:', moviepy.__version__)"
-        pip list | grep -E "moviepy|edge-tts|pydub"
-
+          libsm6 \
+          libxext6 \
+          libgl1 \
+          libfontconfig1 \
+          libxrender1 \
+          fonts-dejavu-core \
+          fonts-liberation \
+          fonts-freefont-ttf \
+          fonts-noto-core
+        ffmpeg -version | head -1
+    
+    - name: Install Python dependencies      run: |
+        pip install --upgrade pip
+        pip install \
+          requests \
+          Pillow \
+          numpy \
+          edge-tts \
+          pydub \
+          lxml
+        python -c "import edge_tts; print('edge-tts installed')"
+    
+    - name: Cache Python dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
     - name: Run Ajeebology Pipeline
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-        UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         CATEGORY_OVERRIDE: ${{ github.event.inputs.category }}
       run: |
-        echo "Starting Ajeebology Shorts Pipeline..."
+        echo "🚀 Starting Ajeebology Shorts Pipeline..."
+        echo "⏰ Run Time: $(date)"
+        echo "🔢 Run ID: $GITHUB_RUN_ID"
+        
+        mkdir -p output
+        
         python youtube_agent.py
-
-    - name: Upload video artifact
-      uses: actions/upload-artifact@v4
+        
+        if [ -f /tmp/ajeebology/output/output_video.mp4 ]; then
+          cp /tmp/ajeebology/output/output_video.mp4 output/
+          echo "✅ Video copied to output/"
+        fi
+        
+        if [ -f /tmp/ajeebology/output/thumbnail.jpg ]; then
+          cp /tmp/ajeebology/output/thumbnail.jpg output/
+          echo "✅ Thumbnail copied to output/"
+        fi
+        
+        ls -lh output/
+    
+    - name: Upload video artifact      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: ajeebology-video-${{ github.run_id }}
         path: |
-          /tmp/ajeebology/output/output_video.mp4
-          /tmp/ajeebology/output/thumbnail.jpg
+          output/output_video.mp4
+          output/thumbnail.jpg
+          output/metadata.json
         retention-days: 7
-
+        if-no-files-found: warn
+    
     - name: Notify on failure
       if: failure()
       env:
@@ -86,5 +117,5 @@ jobs:
           "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
           -d "chat_id=${TELEGRAM_CHAT_ID}" \
           -d "parse_mode=HTML" \
-          -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun: ${{ github.run_id }}" \
+          -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>" \
           || true
