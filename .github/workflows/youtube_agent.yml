@@ -30,13 +30,6 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Cache pip packages
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: pip-${{ hashFiles('requirements.txt') }}
-        restore-keys: pip-
-
     - name: Cache downloaded assets (images, music)
       uses: actions/cache@v4
       with:
