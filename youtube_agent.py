@@ -47,7 +47,8 @@ class Config:
     MAX_DURATION = 60
     
     VOICE_MODEL = "hi-IN-MadhurNeural"
-    AUDIO_SAMPLE_RATE = 44100    VOICE_RATE = "+15%"
+    AUDIO_SAMPLE_RATE = 44100  
+    VOICE_RATE = "+15%"
     
     FONT_SIZE_TITLE = 72
     FONT_SIZE_BODY = 56
