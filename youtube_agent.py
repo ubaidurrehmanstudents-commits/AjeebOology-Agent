@@ -96,7 +96,8 @@ class ScriptSegment:
     duration_estimate: float = 0.0
 
 
-@dataclassclass VideoScript:
+@dataclass
+class VideoScript:
     """Complete video script with metadata."""
     title: str
     category: str
