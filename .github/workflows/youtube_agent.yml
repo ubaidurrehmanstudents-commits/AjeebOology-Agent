@@ -1,10 +1,7 @@
-# Write YAML file first (as requested: pehle YAML, phir Python)
-
-yaml_code = '''name: Ajeebology Shorts - Daily Automation
+name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
-    # 8:45 AM UTC = 1:45 PM PKT (runs before 5 PM upload time)
     - cron: '45 8 * * *'
   workflow_dispatch:
     inputs:
@@ -132,11 +129,4 @@ jobs:
           -d "parse_mode=HTML" \
           -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0ARepository: ${{ github.repository }}%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>" \
           || true
-'''
-
-with open('/mnt/agents/output/youtube_agent.yml', 'w') as f:
-    f.write(yaml_code)
-
-print("YAML file written successfully!")
-print(f"Path: /mnt/agents/output/youtube_agent.yml")
-print(f"Size: {len(yaml_code)} characters")
+          
