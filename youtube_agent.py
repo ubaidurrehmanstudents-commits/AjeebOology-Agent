@@ -46,9 +46,10 @@ class Config:
     TARGET_DURATION = 58
     MAX_DURATION = 60
     
-    # Voice settings (Urdu/Hindi male voice)
-    VOICE_MODEL = "hi-IN-MadhurNeural"    AUDIO_SAMPLE_RATE = 44100
-    VOICE_RATE = "+15%"  # Faster speech for engagement
+    # Voice settings
+    VOICE_MODEL = "hi-IN-MadhurNeural"
+    AUDIO_SAMPLE_RATE = 44100
+    VOICE_RATE = "+15%"
     
     # Font sizes
     FONT_SIZE_TITLE = 72
@@ -56,15 +57,15 @@ class Config:
     FONT_SIZE_SMALL = 40
     FONT_SIZE_CAPTION = 64
     
-    # Colors (Professional dark theme)
+    # Colors
     COLOR_BG_PRIMARY = (10, 5, 25)
     COLOR_BG_SECONDARY = (30, 15, 60)
-    COLOR_ACCENT = (0, 255, 255)  # Cyan
-    COLOR_ACCENT_2 = (255, 0, 128)  # Magenta
+    COLOR_ACCENT = (0, 255, 255)
+    COLOR_ACCENT_2 = (255, 0, 128)
     COLOR_TEXT = (255, 255, 255)
-    COLOR_HIGHLIGHT = (255, 255, 0)  # Yellow for emphasis
+    COLOR_HIGHLIGHT = (255, 255, 0)
     
-    # Directory structure
+    # Directories
     BASE_DIR = Path("/tmp/ajeebology")
     FRAMES_DIR = BASE_DIR / "frames"
     AUDIO_DIR = BASE_DIR / "audio"
@@ -77,10 +78,9 @@ class Config:
     UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
     
     # Audio processing
-    SILENCE_THRESHOLD = -40  # dB
-    MIN_GAP_DURATION = 0.05  # 50ms gap between sentences (natural)
-    BG_MUSIC_VOLUME = 0.12   # 12% volume for background music
-
+    SILENCE_THRESHOLD = -40
+    MIN_GAP_DURATION = 0.05
+    BG_MUSIC_VOLUME = 0.12
 
 # =============================================================================
 # DATA STRUCTURES
