@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import time
+import edge_tts
+import requests
 import math
 import random
 import string
