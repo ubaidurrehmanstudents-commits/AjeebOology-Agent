@@ -2,7 +2,6 @@ name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
-    # Runs at 1:00 PM PKT daily (8:00 AM UTC, PKT = UTC+5)
     - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
@@ -34,37 +33,12 @@ jobs:
     - name: Install system dependencies
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq \
-          ffmpeg \
-          libsm6 \
-          libxext6 \
-          libgl1 \
-          libfontconfig1 \
-          libxrender1 \
-          fonts-dejavu-core \
-          fonts-liberation \
-          fonts-freefont-ttf \
-          fonts-noto-core
-        ffmpeg -version | head -1
+        sudo apt-get install -y -qq ffmpeg libsm6 libxext6 libgl1 libfontconfig1 libxrender1 fonts-dejavu-core fonts-liberation fonts-freefont-ttf fonts-noto-core
     
-    - name: Install Python dependencies      run: |
+    - name: Install Python dependencies
+      run: |
         pip install --upgrade pip
-        pip install \
-          requests \
-          Pillow \
-          numpy \
-          edge-tts \
-          pydub \
-          lxml
-        python -c "import edge_tts; print('edge-tts installed')"
-    
-    - name: Cache Python dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+        pip install requests Pillow numpy edge-tts pydub lxml
     
     - name: Run Ajeebology Pipeline
       env:
@@ -77,26 +51,21 @@ jobs:
         CATEGORY_OVERRIDE: ${{ github.event.inputs.category }}
       run: |
         echo "🚀 Starting Ajeebology Shorts Pipeline..."
-        echo "⏰ Run Time: $(date)"
-        echo "🔢 Run ID: $GITHUB_RUN_ID"
-        
         mkdir -p output
-        
         python youtube_agent.py
-        
         if [ -f /tmp/ajeebology/output/output_video.mp4 ]; then
           cp /tmp/ajeebology/output/output_video.mp4 output/
-          echo "✅ Video copied to output/"
         fi
-        
         if [ -f /tmp/ajeebology/output/thumbnail.jpg ]; then
           cp /tmp/ajeebology/output/thumbnail.jpg output/
-          echo "✅ Thumbnail copied to output/"
         fi
-        
+        if [ -f /tmp/ajeebology/output/metadata.json ]; then
+          cp /tmp/ajeebology/output/metadata.json output/
+        fi
         ls -lh output/
     
-    - name: Upload video artifact      uses: actions/upload-artifact@v4
+    - name: Upload video artifact
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: ajeebology-video-${{ github.run_id }}
@@ -113,9 +82,7 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        curl -s -X POST \
-          "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
           -d "chat_id=${TELEGRAM_CHAT_ID}" \
           -d "parse_mode=HTML" \
-          -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>" \
-          || true
+          -d "text=<b>❌ Pipeline Failed</b>%0ARun: ${{ github.run_id }}"
