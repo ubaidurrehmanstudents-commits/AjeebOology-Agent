@@ -53,10 +53,11 @@ jobs:
           fonts-noto-core
         ffmpeg -version | head -1
 
-    - name: Install Python dependencies
+    - name: Install Python dependencies (with no cache)
       run: |
         pip install --upgrade pip
-        pip install requests Pillow numpy edge-tts pydub moviepy openai-whisper
+        pip install --no-cache-dir requests Pillow numpy edge-tts pydub moviepy openai-whisper
+        pip list | grep -E "moviepy|edge-tts|pydub"
 
     - name: Run Ajeebology Pipeline
       env:
