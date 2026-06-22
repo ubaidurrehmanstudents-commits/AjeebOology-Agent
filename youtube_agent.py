@@ -755,9 +755,9 @@ class VideoEngine:
         
         # For simplicity, we won't highlight individual words in MoviePy TextClip
         # (you could split into multiple clips, but we'll keep it uniform)
-        txt = TextClip(text, fontsize=fontsize, color=color, font=self.font_title, stroke_color=stroke_color, stroke_width=2, method='label')
-                       font=self.font_title, stroke_color=stroke_color, stroke_width=2,
-                       method='caption', size=(self.width*0.9, None))
+        txt = TextClip(text, fontsize=fontsize, color=color,
+               font=self.font_title, stroke_color=stroke_color, stroke_width=2,
+               method='caption', size=(self.width*0.9, None))
         txt = txt.set_position(position).set_duration(duration)
         
         # Slide-in animation (from bottom)
