@@ -2,7 +2,6 @@ name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
-    # Runs at 1:00 PM PKT (08:00 UTC)
     - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
@@ -64,7 +63,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install requests Pillow numpy edge-tts pydub moviepy openai-whisper
 
     - name: Run Ajeebology Pipeline
       env:
@@ -94,7 +93,7 @@ jobs:
     - name: Cleanup temporary files
       if: always()
       run: |
-        rm -rf /tmp/ajeebology/frames  # not used with MoviePy, but safe
+        rm -rf /tmp/ajeebology/frames
 
     - name: Notify on failure
       if: failure()
