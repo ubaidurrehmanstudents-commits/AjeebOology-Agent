@@ -528,7 +528,7 @@ Focus on retention and shareability."""
         }
         
         template = templates.get(category, templates["weird_facts"])
-                segments = template["segments"]
+        segments = template["segments"]
         total_duration = sum(seg.duration_estimate for seg in segments)
         
         return VideoScript(
