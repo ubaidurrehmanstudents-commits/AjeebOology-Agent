@@ -280,9 +280,9 @@ class ResearchAgent:
             }
         }
         
-        cat = category or random.choice(self.CATEGORIES)        print(f"⚠️ Using fallback fact for {cat}")
+cat = category or random.choice(self.CATEGORIES)
+        print(f"⚠️ Using fallback fact for {cat}")
         return fallbacks[cat]
-
 # =============================================================================
 # 2. SCRIPT GENERATION (Groq/LLaMA)
 # =============================================================================
