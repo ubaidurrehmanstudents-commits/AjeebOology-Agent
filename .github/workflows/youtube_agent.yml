@@ -2,7 +2,8 @@ name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
-    - cron: '45 8 * * *'
+    # Runs at 9:00 AM PST daily (16:00 UTC, adjusts for DST automatically)
+    - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
       category:
@@ -54,7 +55,8 @@ jobs:
           Pillow \
           numpy \
           edge-tts \
-          openai-whisper
+          openai-whisper \
+          pydub
         python -c "import PIL; print('Pillow:', PIL.__version__)"
         python -c "import numpy; print('NumPy:', numpy.__version__)"
     
