@@ -816,7 +816,8 @@ class VideoEngine:
                 input_indices.append((i, len(cmd) // 3)) # Track input index
         
         # Add audio
-        cmd.extend(["-i", final_audio_path])        audio_input_idx = len(cmd) // 3
+        cmd.extend(["-i", final_audio_path])       
+             audio_input_idx = len(cmd) // 3
         
         # Add subtitles
         cmd.extend(["-vf", f"ass={ass_path}"])
