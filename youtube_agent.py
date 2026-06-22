@@ -90,7 +90,7 @@ class Config:
 class ScriptSegment:
     """Represents a single segment of the video script."""
     text: str
-    segment_type: str  # hook, fact1, fact2, fact3, outro
+    segment_type: str
     emphasis_words: List[str] = field(default_factory=list)
     broll_prompt: str = ""
     duration_estimate: float = 0.0
@@ -118,6 +118,7 @@ class AudioSegment:
     start_time: float
     end_time: float
     word_boundaries: List[Dict] = field(default_factory=list)
+
 
 
 # =============================================================================
