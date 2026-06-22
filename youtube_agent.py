@@ -639,7 +639,8 @@ class VoiceAgent:
     
     def _clean_for_tts(self, text: str) -> str:
         """Clean text for TTS processing."""
-        text = re.sub(r'[!]{2,}', '!', text)        text = re.sub(r'[?]{2,}', '?', text)
+        text = re.sub(r'[!]{2,}', '!', text)      
+        text = re.sub(r'[?]{2,}', '?', text)
         return text.strip()
     
     def _create_silent_audio(self, path: str, duration: float):
