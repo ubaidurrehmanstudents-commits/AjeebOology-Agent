@@ -51,15 +51,16 @@ class Config:
     KEN_BURNS_PAN = 20
     PROGRESS_BAR_H = 12
     PROGRESS_BAR_COLOR = "cyan"
+    WATERMARK_Y = 60
     CTA_DURATION = 8.0
     PARTICLE_COUNT = 50
     GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
     TAVILY_URL = "https://api.tavily.com/search"
     POLLINATIONS_URL = "https://image.pollinations.ai/prompt/{}"
-    SFX_WHOOSH = "https://cdn.pixabay.com/download/audio/2022/03/24/audio_07b2a04be3.mp3"
-    SFX_POP = "https://cdn.pixabay.com/download/audio/2022/03/15/audio_c8c8a73467.mp3"
-    SFX_RISER = "https://cdn.pixabay.com/download/audio/2021/08/04/audio_0625c1531c.mp3"
-    MUSIC_URL = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3"
+    SFX_WHOOSH = ""
+    SFX_POP = ""
+    SFX_RISER = ""
+    MUSIC_URL = ""
     CATEGORIES = ["psychology", "space", "weird facts"]
     EMPHASIS_WORDS = [
         "shocking", "amazing", "unbelievable", "crazy", "insane",
@@ -130,6 +131,7 @@ def run_ffmpeg(cmd: List[str], check: bool = True) -> subprocess.CompletedProces
     full_cmd = ["ffmpeg", "-y"] + cmd
     result = subprocess.run(full_cmd, capture_output=True, text=True)
     if check and result.returncode != 0:
+        print(f"FFmpeg FAILED: {' '.join(full_cmd)}")
         print(f"FFmpeg stderr: {result.stderr}")
         raise subprocess.CalledProcessError(
             result.returncode, full_cmd, output=result.stdout, stderr=result.stderr
@@ -151,6 +153,8 @@ def get_audio_duration(path: str) -> float:
 
 
 def download_file(url: str, path: str, timeout: int = 30) -> bool:
+    if not url:
+        return False
     for attempt in range(3):
         try:
             r = requests.get(url, timeout=timeout, stream=True)
@@ -202,6 +206,20 @@ def get_gradient_colors() -> Tuple[str, str]:
         ("1e3c72", "2a5298")
     ]
     return random.choice(colors)
+
+
+def build_geq_gradient(width: int, height: int, c1: str, c2: str) -> str:
+    r1 = int(c1[0:2], 16)
+    g1 = int(c1[2:4], 16)
+    b1 = int(c1[4:6], 16)
+    r2 = int(c2[0:2], 16)
+    g2 = int(c2[2:4], 16)
+    b2 = int(c2[4:6], 16)
+    return (
+        f"geq=r='({r1}+({r2}-{r1})*Y/{height})':"
+        f"g='({g1}+({g2}-{g1})*Y/{height})':"
+        f"b='({b1}+({b2}-{b1})*Y/{height})'"
+    )
 
 
 # =============================================================================
@@ -607,9 +625,11 @@ class AssetAgent:
     def _create_placeholder(self, index: int) -> str:
         path = str(self.temp_dir / f"broll_{index}_fallback.jpg")
         c1, c2 = get_gradient_colors()
+        geq = build_geq_gradient(Config.WIDTH, Config.HEIGHT, c1, c2)
         run_ffmpeg([
             "-f", "lavfi", "-i",
-            f"gradients=s={Config.WIDTH}x{Config.HEIGHT}:x0=0:y0=0:x1={Config.WIDTH}:y1={Config.HEIGHT}:colors={c1}+{c2}:steps=30:seed={index}",
+            f"color=c=black:s={Config.WIDTH}x{Config.HEIGHT}",
+            "-vf", geq,
             "-frames:v", "1", path
         ])
         return path
@@ -670,12 +690,11 @@ class VideoEngine:
         self.temp_dir = Path(Config.TEMP_DIR)
         self.font_path = self._find_font()
 
-    def _find_font(self) -> str:
+    def _find_font(self):
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"
         ]
         for c in candidates:
             if Path(c).exists():
@@ -733,13 +752,11 @@ class VideoEngine:
     def _create_background(self, duration):
         output = str(self.temp_dir / "background.mp4")
         c1, c2 = get_gradient_colors()
-        grad = (
-            f"gradients=s={Config.WIDTH}x{Config.HEIGHT}:"
-            f"x0=0:y0=0:x1={Config.WIDTH}:y1={Config.HEIGHT}:"
-            f"colors={c1}+{c2}:steps=30:seed=42"
-        )
+        geq = build_geq_gradient(Config.WIDTH, Config.HEIGHT, c1, c2)
         run_ffmpeg([
-            "-f", "lavfi", "-i", grad,
+            "-f", "lavfi", "-i",
+            f"color=c=black:s={Config.WIDTH}x{Config.HEIGHT}:d={duration}",
+            "-vf", geq,
             "-t", str(duration), "-pix_fmt", "yuv420p",
             "-c:v", "libx264", "-preset", "ultrafast",
             "-threads", "0", "-an", output
@@ -923,41 +940,44 @@ class VideoEngine:
         return lines
 
     def _build_zoom_expr(self, word_timings):
-        terms = ["0"]
+        terms = []
         for wt in word_timings:
             if wt.is_emphasis:
                 s = round(wt.start, 2)
                 e = round(s + Config.ZOOM_DURATION, 2)
                 terms.append(f"between(t,{s},{e})")
-        if len(terms) == 1:
+        if not terms:
             return ""
-        return f"1+0.08*max({','.join(terms)})"
+        return f"1+0.08*({' + '.join(terms)})"
 
     def _build_shake_expr(self, script, segment_timings):
-        terms = ["0"]
+        terms = []
         for timing in segment_timings:
             if timing["segment"].is_shocking:
                 s = round(timing["start"], 2)
                 e = round(s + Config.SHAKE_DURATION, 2)
                 terms.append(f"between(t,{s},{e})")
-        if len(terms) == 1:
+        if not terms:
             return ""
-        x_expr = f"if(max({','.join(terms)}),(random(1)-0.5)*4,0)"
-        y_expr = f"if(max({','.join(terms)}),(random(2)-0.5)*4,0)"
+        sum_expr = " + ".join(terms)
+        x_expr = f"(random(1)-0.5)*4*({sum_expr})"
+        y_expr = f"(random(2)-0.5)*4*({sum_expr})"
         return f"{x_expr}:{y_expr}"
 
     def _build_flash_expr(self, script, segment_timings):
-        terms = ["0"]
+        terms = []
         for i, timing in enumerate(segment_timings):
             if timing["segment"].is_shocking and i > 0:
                 s = round(timing["start"] - 0.3, 2)
                 e = round(s + Config.FLASH_DURATION, 2)
                 if s > 0:
                     terms.append(f"between(t,{s},{e})")
-        if len(terms) == 1:
+        if not terms:
             return ""
-        b = f"max({','.join(terms)})"
-        return f"1+1*{b}:1-0.5*{b}"
+        sum_expr = " + ".join(terms)
+        brightness = f"1+1*({sum_expr})"
+        contrast = f"1-0.5*({sum_expr})"
+        return f"{brightness}:{contrast}"
 
     def _composite_video(
         self,
@@ -978,8 +998,8 @@ class VideoEngine:
         if zoom_expr:
             filters.append(
                 f"{last}scale='iw*{zoom_expr}':'ih*{zoom_expr}',"
-                f"crop='iw/{zoom_expr}':'ih/{zoom_expr}':"
-                f"'(iw-iw/{zoom_expr})/2':'(ih-ih/{zoom_expr})/2'[zoomed]"
+                f"crop='iw/({zoom_expr})':'ih/({zoom_expr})':"
+                f"'(iw-iw/({zoom_expr}))/2':'(ih-ih/({zoom_expr}))/2'[zoomed]"
             )
             last = "[zoomed]"
 
