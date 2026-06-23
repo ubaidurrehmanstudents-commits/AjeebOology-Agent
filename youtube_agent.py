@@ -1048,7 +1048,7 @@ class VideoEngine:
         parts.append(
             f"drawbox=x=0:y={Config.HEIGHT - Config.PROGRESS_BAR_H}:"
             f"w='{bar_w}':h={Config.PROGRESS_BAR_H}:"
-            f"color={Config.PROGRESS_BAR_COLOR}:t=max"
+            f"color={Config.PROGRESS_BAR_COLOR}:t=fill"
         )
 
         parts.append(
@@ -1060,12 +1060,12 @@ class VideoEngine:
 
         parts.append(
             f"drawbox=x='w/2+140':y={Config.WATERMARK_Y + 10}:"
-            f"w=12:h=12:color=red:t=max"
+            f"w=12:h=12:color=red:t=fill"
         )
 
         parts.append(
             f"drawbox=x='(w-340)/2':y=180:w=340:h=60:"
-            f"color=0xFFD700:t=max:enable='lt(t,3)'"
+            f"color=0xFFD700:t=fill:enable='lt(t,3)'"
         )
         parts.append(
             f"drawtext={font_opt}text='DID YOU KNOW?':"
@@ -1078,7 +1078,7 @@ class VideoEngine:
             e = round(timing["end"], 2)
             parts.append(
                 f"drawbox=x=50:y=50:w=60:h=60:"
-                f"color=0xFF4444:t=max:enable='between(t,{s},{e})'"
+                f"color=0xFF4444:t=fill:enable='between(t,{s},{e})'"
             )
             parts.append(
                 f"drawtext={font_opt}text='{i}':"
@@ -1095,7 +1095,7 @@ class VideoEngine:
         )
         parts.append(
             f"drawbox=x='(w-400)/2':y='{box_y}':"
-            f"w=400:h=80:color=red:t=max:"
+            f"w=400:h=80:color=red:t=fill:"
             f"enable='gte(t,{cta_s})'"
         )
         text_y = (
