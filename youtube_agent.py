@@ -36,41 +36,33 @@ from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
 import requests
+import edge_tts
 
 # ╔═════════════════════════════════════════════════════════════════════════╗
 # ║  SECTION 1: CONFIGURATION & CONSTANTS                                 ║
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
-# ── API Keys (from GitHub Actions secrets / environment) ──
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY     = os.environ.get("TAVILY_API_KEY")
 PEXELS_API_KEY     = os.environ.get("PEXELS_API_KEY")
 TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ── Video Dimensions ──
 VIDEO_WIDTH        = 1080
 VIDEO_HEIGHT       = 1920
 VIDEO_FPS          = 30
+TARGET_DURATION    = 60
+MIN_DURATION       = 45
+MAX_DURATION       = 75
+PHRASE_MIN_WORDS   = 3
+PHRASE_MAX_WORDS   = 12
+TARGET_PHRASE_COUNT = 12
 
-# ── Timing Targets ──
-TARGET_DURATION    = 60       # target video length in seconds
-MIN_DURATION       = 45       # minimum acceptable duration
-MAX_DURATION       = 75       # maximum acceptable duration
-PHRASE_MIN_WORDS   = 3        # minimum words per phrase
-PHRASE_MAX_WORDS   = 12       # maximum words per phrase
-TARGET_PHRASE_COUNT = 12      # target number of phrases
-
-# ── Brand Colors (Ajeebology: Purple + Cyan) ──
 BRAND_PURPLE_HEX   = "#1a0a2e"
-BRAND_PURPLE_RGB   = "26,10,46"
 BRAND_CYAN_HEX     = "#00FFFF"
-BRAND_CYAN_RGB     = "0,255,255"
 BRAND_GOLD_HEX     = "#FFD700"
 BRAND_WHITE_HEX    = "#FFFFFF"
-BRAND_DARK_HEX     = "#0D0618"
 
-# ── Paths ──
 OUTPUT_DIR         = Path("/tmp/ajeebology_output")
 FINAL_VIDEO        = OUTPUT_DIR / "output_video.mp4"
 VOICE_AUDIO        = OUTPUT_DIR / "voice_combined.mp3"
@@ -79,16 +71,12 @@ FINAL_AUDIO        = OUTPUT_DIR / "final_audio.mp3"
 STOCK_VIDEO_DIR    = OUTPUT_DIR / "stock_clips"
 INTRO_VIDEO        = OUTPUT_DIR / "intro.mp4"
 SUBTITLES_FILE     = OUTPUT_DIR / "subtitles.ass"
-SUBSCRIBE_OVERLAY  = OUTPUT_DIR / "subscribe_overlay.png"
-PROGRESS_BAR_FILE  = OUTPUT_DIR / "progress_bar.png"
+SUBSCRIBE_OVERLAY  = OUTPUT_DIR / "subscribe_overlay.mp4"
 THUMBNAIL_FILE     = OUTPUT_DIR / "thumbnail.jpg"
 METADATA_FILE      = OUTPUT_DIR / "metadata.json"
 
-# ── Font ──
 FONT_BOLD          = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REGULAR       = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-
-# ── Logging ──
 LOG_FILE           = OUTPUT_DIR / "pipeline.log"
 
 
@@ -97,7 +85,6 @@ LOG_FILE           = OUTPUT_DIR / "pipeline.log"
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 def log(message: str, level: str = "INFO"):
-    """Log a timestamped message to stdout and log file."""
     timestamp = datetime.now().strftime("%H:%M:%S")
     formatted = f"[{timestamp}] [{level}] {message}"
     print(formatted, flush=True)
@@ -109,24 +96,17 @@ def log(message: str, level: str = "INFO"):
 
 
 def log_step(step_num: int, total_steps: int, name: str):
-    """Log the beginning of a pipeline step."""
     log("")
     log("━" * 55)
     log(f"  STEP {step_num}/{total_steps}: {name}")
     log("━" * 55)
 
 
-def run_ffmpeg(args: list, timeout: int = 300,
-               capture: bool = True) -> Tuple[bool, str, str]:
-    """Run an ffmpeg command safely. Returns (success, stdout, stderr)."""
+def run_ffmpeg(args: list, timeout: int = 300) -> Tuple[bool, str, str]:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + args
     try:
         result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout
+            cmd, check=True, capture_output=True, text=True, timeout=timeout
         )
         return True, result.stdout or "", result.stderr or ""
     except subprocess.CalledProcessError as e:
@@ -137,12 +117,11 @@ def run_ffmpeg(args: list, timeout: int = 300,
         log(f"FFmpeg timed out after {timeout}s", "ERROR")
         return False, "", "Timeout"
     except FileNotFoundError:
-        log("FFmpeg not found! Is it installed?", "CRITICAL")
+        log("FFmpeg not found!", "CRITICAL")
         return False, "", "FFmpeg not found"
 
 
 def get_media_duration(file_path: Path) -> float:
-    """Get media duration in seconds using ffprobe."""
     if not file_path.exists() or file_path.stat().st_size < 100:
         return 0.0
     try:
@@ -159,13 +138,11 @@ def get_media_duration(file_path: Path) -> float:
 
 
 def get_video_resolution(file_path: Path) -> Tuple[int, int]:
-    """Get video resolution using ffprobe."""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height",
-             "-of", "csv=s=x:p=0",
-             str(file_path)],
+             "-of", "csv=s=x:p=0", str(file_path)],
             capture_output=True, text=True, timeout=15
         )
         parts = result.stdout.strip().split("x")
@@ -178,7 +155,6 @@ def get_video_resolution(file_path: Path) -> Tuple[int, int]:
 
 def retry(func, max_retries: int = 3, delay: float = 2.0,
           backoff: float = 2.0, exceptions=(Exception,)):
-    """Retry a function with exponential backoff."""
     last_exception = None
     current_delay = delay
     for attempt in range(1, max_retries + 1):
@@ -197,10 +173,8 @@ def retry(func, max_retries: int = 3, delay: float = 2.0,
 
 
 def safe_json_parse(text: str) -> Optional[dict]:
-    """Safely parse JSON from LLM output, handling markdown fences."""
     if not text:
         return None
-    # Remove markdown code fences
     if "```" in text:
         parts = text.split("```")
         for part in parts:
@@ -214,7 +188,6 @@ def safe_json_parse(text: str) -> Optional[dict]:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Try to find JSON object boundaries
         start = text.find("{")
         end = text.rfind("}")
         if start >= 0 and end > start:
@@ -226,12 +199,10 @@ def safe_json_parse(text: str) -> Optional[dict]:
 
 
 def ensure_dir(path: Path):
-    """Ensure a directory exists."""
     path.mkdir(parents=True, exist_ok=True)
 
 
 def format_time(seconds: float) -> str:
-    """Format seconds to H:MM:SS.cs (ASS time format)."""
     seconds = max(0, seconds)
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -240,25 +211,13 @@ def format_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{int(s):02d}.{cs:02d}"
 
 
-def format_time_srt(seconds: float) -> str:
-    """Format seconds to HH:MM:SS,mmm (SRT time format)."""
-    seconds = max(0, seconds)
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-
 def get_file_size_mb(file_path: Path) -> float:
-    """Get file size in MB."""
     if file_path.exists():
         return file_path.stat().st_size / (1024 * 1024)
     return 0.0
 
 
 def clean_temp_files(keep: list = None):
-    """Clean temporary files, keeping specified ones."""
     if keep is None:
         keep = [FINAL_VIDEO, METADATA_FILE]
     for f in OUTPUT_DIR.glob("*"):
@@ -275,7 +234,6 @@ def clean_temp_files(keep: list = None):
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 def research_fact() -> str:
-    """Research an interesting fact using Tavily search API with fallbacks."""
     categories = [
         ("psychology", [
             "psychology fact about human behavior",
@@ -302,13 +260,11 @@ def research_fact() -> str:
         ])
     ]
 
-    # Pick a random category and query
     category_name, queries = random.choice(categories)
     query = random.choice(queries)
     log(f"Research category: {category_name}")
     log(f"Search query: '{query}'")
 
-    # Try Tavily with retry
     def _search():
         response = requests.post(
             "https://api.tavily.com/search",
@@ -331,10 +287,8 @@ def research_fact() -> str:
         data = retry(_search, max_retries=2, delay=3.0)
     except Exception as e:
         log(f"Tavily search failed after retries: {e}", "WARN")
-        # Fallback: use a curated fact database
         return get_fallback_fact(category_name)
 
-    # Extract the most useful content
     answer = data.get("answer", "")
     if answer and len(answer) > 50:
         log(f"Research result: {answer[:120]}...")
@@ -348,21 +302,17 @@ def research_fact() -> str:
             log(f"Using result: {content[:120]}...")
             return content
 
-    # Last resort: fallback fact
     log("No good result from Tavily, using fallback fact", "WARN")
     return get_fallback_fact(category_name)
 
 
 def get_fallback_fact(category: str) -> str:
-    """Return a curated fact when API search fails."""
     fallback_facts = {
         "psychology": [
             "The human brain processes 70,000 thoughts per day on average. "
-            "Most of these thoughts are automatic and happen below our conscious awareness. "
-            "This is why your brain can drive a car on autopilot while your mind wanders.",
+            "Most of these thoughts are automatic and happen below our conscious awareness.",
             "People are more likely to remember information when it's presented in a story "
-            "rather than as plain facts. This is called the 'narrative bias' and it's why "
-            "storytelling is so powerful in marketing and education.",
+            "rather than as plain facts. This is called the 'narrative bias'.",
             "The 'spotlight effect' makes us believe people notice us more than they actually do. "
             "In reality, most people are too focused on themselves to pay close attention to you."
         ],
@@ -401,7 +351,6 @@ def get_fallback_fact(category: str) -> str:
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 def generate_script(fact_context: str) -> dict:
-    """Generate a structured Hinglish script using Groq LLaMA 3."""
     system_prompt = """You are a top YouTube Shorts script writer for "Ajeebology Shorts" — 
 a Hinglish (Hindi+English, Roman script) channel covering psychology, space, and weird world facts.
 
@@ -413,11 +362,10 @@ Your scripts go VIRAL because they are:
 
 ABSOLUTE RULES:
 - Write ALL text in Roman Hinglish (NOT Devanagari script)
-  Example: "Kya aap jaante hain ki insaan ka dimaag..."
 - Each phrase must be 3-12 words (short, punchy, complete sentence)
 - Generate EXACTLY 12-14 phrases
 - First phrase = POWERFUL HOOK (question or shocking statement)
-- Last 2 phrases = Value summary + Subscribe CTA ("Ajeebology Shorts ko subscribe karein!")
+- Last 2 phrases = Value summary + Subscribe CTA
 - Include a relevant Pexels video search keyword
 - Output ONLY valid JSON, no markdown, no explanation
 
@@ -439,7 +387,7 @@ JSON STRUCTURE (exact):
   ]
 }"""
 
-    log("Generating script via Groq LLaMA 3 70B...")
+    log("Generating script via Groq LLaMA...")
 
     def _generate():
         response = requests.post(
@@ -449,7 +397,7 @@ JSON STRUCTURE (exact):
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama3-70b-8192",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content":
@@ -482,13 +430,11 @@ JSON STRUCTURE (exact):
         return script
     except Exception as e:
         log(f"Script generation failed: {e}", "ERROR")
-        # Emergency fallback script
         log("Generating emergency fallback script...", "WARN")
         return generate_emergency_script(fact_context)
 
 
 def generate_emergency_script(fact_context: str) -> dict:
-    """Generate a simple script when Groq fails completely."""
     category = random.choice(["psychology", "space", "weird", "brain"])
     fact_snippet = fact_context[:300]
 
@@ -512,8 +458,7 @@ def generate_emergency_script(fact_context: str) -> dict:
         "category": category,
         "seo_title": f"Amazing {category.capitalize()} Fact | Ajeebology Shorts",
         "description": f"Ek aaisa {category} fact jo aapne kabhi nahi suna hoga! "
-                       f"Watch till end for surprise. Ajeebology Shorts - "
-                       f"Psychology, Space aur Weird Facts ka best channel!",
+                       f"Watch till end for surprise. Ajeebology Shorts!",
         "tags": [f"{category} facts", "hinglish facts", "amazing facts",
                  "mind blowing", "ajeebology"],
         "hashtags": f"#{category} #facts #hinglishfacts #amazing #ajeebology",
@@ -523,7 +468,6 @@ def generate_emergency_script(fact_context: str) -> dict:
 
 
 def validate_script(script: dict) -> dict:
-    """Validate and repair script fields."""
     required = ["title", "category", "phrases", "tags", "hashtags"]
     for field in required:
         if field not in script:
@@ -537,7 +481,6 @@ def validate_script(script: dict) -> dict:
             else:
                 script[field] = f"Amazing Facts {datetime.now().day}"
 
-    # Ensure phrases are valid
     phrases = []
     for p in script["phrases"]:
         p = p.strip()
@@ -545,8 +488,7 @@ def validate_script(script: dict) -> dict:
             phrases.append(p)
     if not phrases:
         phrases = ["Kya aap jaante hain? Yeh fact amazing hai!"]
-    script["phrases"] = phrases[:14]  # cap at 14
-
+    script["phrases"] = phrases[:14]
     return script
 
 
@@ -558,7 +500,6 @@ async def generate_single_audio(phrase: str, output_path: Path,
                                  voice: str = "hi-IN-MadhurNeural",
                                  rate: str = "-5%",
                                  pitch: str = "-2Hz") -> float:
-    """Generate TTS audio for a single phrase. Returns duration in seconds."""
     try:
         communicate = edge_tts.Communicate(
             text=phrase.strip(),
@@ -569,7 +510,6 @@ async def generate_single_audio(phrase: str, output_path: Path,
         await communicate.save(str(output_path))
     except Exception as e:
         log(f"edge-tts failed for '{phrase[:40]}...': {e}", "ERROR")
-        # Create a minimal silent file as fallback
         run_ffmpeg([
             "-f", "lavfi", "-i",
             f"anullsrc=r=44100:cl=mono:d=2.0",
@@ -583,7 +523,6 @@ async def generate_single_audio(phrase: str, output_path: Path,
 
 
 async def generate_all_audio(phrases: list) -> List[Dict]:
-    """Generate audio for all phrases sequentially (edge-tts is rate-limited)."""
     audio_files = []
     total = len(phrases)
     log(f"Generating audio for {total} phrases with edge-tts...")
@@ -602,7 +541,6 @@ async def generate_all_audio(phrases: list) -> List[Dict]:
             "word_count": len(phrase.split()),
         })
 
-        # Brief pause to avoid rate limiting
         if i < total - 1:
             await asyncio.sleep(0.3)
 
@@ -613,16 +551,23 @@ async def generate_all_audio(phrases: list) -> List[Dict]:
 
 def concatenate_and_trim_audio(audio_files: List[Dict],
                                 output_path: Path) -> float:
-    """Concatenate all phrase audio files with crossfade, trim silence."""
     log("Concatenating and processing audio...")
 
-    # Create concat file
+    if not audio_files or all(af["duration"] < 0.1 for af in audio_files):
+        log("No valid audio files to concatenate!", "ERROR")
+        # Generate silence as fallback
+        run_ffmpeg([
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:d=30",
+            str(output_path)
+        ])
+        return get_media_duration(output_path)
+
     concat_list = OUTPUT_DIR / "concat.txt"
     with open(concat_list, "w", encoding="utf-8") as f:
         for af in audio_files:
-            f.write(f"file '{af['path']}'\n")
+            if Path(af["path"]).exists() and Path(af["path"]).stat().st_size > 100:
+                f.write(f"file '{af['path']}'\n")
 
-    # Concatenate
     raw_combined = OUTPUT_DIR / "voice_raw.mp3"
     success, _, _ = run_ffmpeg([
         "-f", "concat", "-safe", "0",
@@ -631,7 +576,7 @@ def concatenate_and_trim_audio(audio_files: List[Dict],
         str(raw_combined)
     ])
 
-    if not success:
+    if not success or not raw_combined.exists():
         log("Direct concat failed, re-encoding...", "WARN")
         success, _, _ = run_ffmpeg([
             "-f", "concat", "-safe", "0",
@@ -641,10 +586,13 @@ def concatenate_and_trim_audio(audio_files: List[Dict],
         ])
 
     if not success or not raw_combined.exists():
-        log("Audio concatenation failed!", "ERROR")
-        return 0.0
+        log("Audio concatenation failed, generating silence", "ERROR")
+        run_ffmpeg([
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:d=30",
+            str(output_path)
+        ])
+        return get_media_duration(output_path)
 
-    # Trim leading/trailing silence
     trimmed = OUTPUT_DIR / "voice_trimmed.mp3"
     success, _, _ = run_ffmpeg([
         "-i", str(raw_combined),
@@ -668,14 +616,8 @@ def concatenate_and_trim_audio(audio_files: List[Dict],
 
 def calculate_word_timings(phrase: str, phrase_duration: float
                            ) -> List[Dict]:
-    """Calculate per-word timings within a phrase using char-length weighting.
-    
-    This gives reasonable word-level timing without needing Whisper.
-    Longer words naturally take more time to speak.
-    Returns list of {word, start, end, duration_cs} where cs = centiseconds.
-    """
     words = phrase.strip().split()
-    if not words:
+    if not words or phrase_duration <= 0:
         return []
 
     total_chars = sum(len(w) for w in words)
@@ -686,16 +628,14 @@ def calculate_word_timings(phrase: str, phrase_duration: float
     current_time = 0.0
 
     for word in words:
-        # Each word gets time proportional to its character length
         word_duration = (len(word) / total_chars) * phrase_duration
-        # But ensure minimum duration for very short words
         word_duration = max(word_duration, 0.15)
 
         timings.append({
             "word": word,
             "start": current_time,
             "end": current_time + word_duration,
-            "duration_cs": int(word_duration * 100)  # centiseconds for ASS
+            "duration_cs": int(word_duration * 100)
         })
         current_time += word_duration
 
@@ -707,11 +647,14 @@ def calculate_word_timings(phrase: str, phrase_duration: float
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 def fetch_background_music(target_duration: float) -> Optional[Path]:
-    """Fetch royalty-free background music. Multiple fallback sources."""
     output_path = OUTPUT_DIR / "bg_music.mp3"
+
+    if target_duration < 5:
+        log(f"Duration too short ({target_duration:.0f}s) for music, skipping", "WARN")
+        return None
+
     log(f"Fetching background music ({target_duration:.0f}s target)...")
 
-    # Source 1: SoundHelix (always available, no API key)
     soundhelix_tracks = [
         "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
         "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
@@ -734,21 +677,21 @@ def fetch_background_music(target_duration: float) -> Optional[Path]:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if downloaded > 10 * 1024 * 1024:  # 10MB cap
+                    if downloaded > 10 * 1024 * 1024:
                         break
 
             if temp_path.stat().st_size < 10000:
                 log(f"  {track_name}: file too small", "WARN")
                 continue
 
-            # Trim to exact duration and apply fade in/out
+            fade_out_start = max(0, target_duration - 2)
             success, _, _ = run_ffmpeg([
                 "-i", str(temp_path),
                 "-t", str(target_duration + 2),
                 "-af",
-                "volume=0.12,"
-                "afade=t=in:ss=0:d=2,"
-                "afade=t=out:st=" + str(target_duration - 2) + ":d=2",
+                f"volume=0.12,"
+                f"afade=t=in:ss=0:d=2,"
+                f"afade=t=out:st={fade_out_start}:d=2",
                 str(output_path)
             ])
 
@@ -760,8 +703,7 @@ def fetch_background_music(target_duration: float) -> Optional[Path]:
             log(f"  Music source failed: {e}", "WARN")
             continue
 
-    # Source 2: Generate ambient/chill background with ffmpeg
-    log("  Generating ambient background music (pink noise + tone)...")
+    log("  Generating ambient background music (pink noise)...")
     success, _, _ = run_ffmpeg([
         "-f", "lavfi",
         "-i", f"anoisesrc=d={target_duration}:c=pink:a=0.015",
@@ -773,7 +715,7 @@ def fetch_background_music(target_duration: float) -> Optional[Path]:
         str(output_path)
     ])
 
-    if success:
+    if success and output_path.exists():
         log("  ✓ Ambient background generated")
         return output_path
 
@@ -785,7 +727,6 @@ def apply_sidechain_ducking(voice_path: Path, music_path: Path,
                              output_path: Path, threshold: float = -18,
                              ratio: float = 5, attack: float = 10,
                              release: float = 100) -> bool:
-    """Apply sidechain compression to duck music under voice."""
     log("Applying sidechain compression (music ducks under voice)...")
 
     success, _, _ = run_ffmpeg([
@@ -803,11 +744,8 @@ def apply_sidechain_ducking(voice_path: Path, music_path: Path,
         str(output_path)
     ], timeout=120)
 
-    if success:
-        log(f"  ✓ Sidechain ducking complete")
-    else:
-        log("  Sidechain compression failed, using simple volume mix", "WARN")
-        # Fallback: simple volume mix
+    if not success:
+        log("  Sidechain failed, using simple volume mix", "WARN")
         success, _, _ = run_ffmpeg([
             "-i", str(voice_path),
             "-i", str(music_path),
@@ -827,7 +765,6 @@ def apply_sidechain_ducking(voice_path: Path, music_path: Path,
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 def search_pexels_videos(keyword: str, per_page: int = 15) -> List[Dict]:
-    """Search Pexels for vertical videos. Returns list of video info dicts."""
     log(f"Searching Pexels for: '{keyword}'")
 
     try:
@@ -851,7 +788,6 @@ def search_pexels_videos(keyword: str, per_page: int = 15) -> List[Dict]:
         videos = data.get("videos", [])
         log(f"  Found {len(videos)} videos")
 
-        # Parse into usable format
         parsed = []
         for video in videos:
             video_info = {
@@ -864,11 +800,9 @@ def search_pexels_videos(keyword: str, per_page: int = 15) -> List[Dict]:
                 "photographer": video.get("user", {}).get("name", "Unknown"),
             }
 
-            # Find best file for 9:16 portrait
             for file in video.get("video_files", []):
                 w = file.get("width", 0)
                 h = file.get("height", 0)
-                # Prefer 1080x1920 or closest
                 if w >= 1080 and h >= 1920:
                     video_info["width"] = w
                     video_info["height"] = h
@@ -893,7 +827,6 @@ def search_pexels_videos(keyword: str, per_page: int = 15) -> List[Dict]:
 
 
 def download_pexels_video(video_info: Dict, output_path: Path) -> bool:
-    """Download a single Pexels video file."""
     url = video_info["url"]
     photographer = video_info.get("photographer", "Unknown")
 
@@ -911,7 +844,7 @@ def download_pexels_video(video_info: Dict, output_path: Path) -> bool:
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if downloaded > 50 * 1024 * 1024:  # 50MB cap
+                    if downloaded > 50 * 1024 * 1024:
                         log(f"    Large file, stopping at 50MB", "WARN")
                         break
 
@@ -932,13 +865,11 @@ def download_pexels_video(video_info: Dict, output_path: Path) -> bool:
 
 def download_stock_videos(keyword: str, category: str,
                            target_duration: float,
-                           max_clips: int = 3) -> List[Path]:
-    """Download multiple stock video clips for variety."""
+                           max_clips: int = 2) -> List[Path]:
     ensure_dir(STOCK_VIDEO_DIR)
 
-    # Try primary keyword first
     keywords_to_try = [keyword, category, "abstract background",
-                       "time lapse nature", "space", "sci fi"]
+                       "time lapse", "space", "sci fi"]
     videos = []
 
     for kw in keywords_to_try:
@@ -946,7 +877,6 @@ def download_stock_videos(keyword: str, category: str,
             break
         results = search_pexels_videos(kw)
         if results:
-            # Take top results we don't already have
             for video_info in results[:max_clips]:
                 if len(videos) >= max_clips:
                     break
@@ -961,14 +891,6 @@ def download_stock_videos(keyword: str, category: str,
     return videos
 
 
-def get_video_duration_safe(file_path: Path) -> float:
-    """Get video duration, with a cap for very long files."""
-    duration = get_media_duration(file_path)
-    if duration > 120:
-        log(f"  Video too long ({duration:.0f}s), will loop segments", "WARN")
-    return duration
-
-
 # ╔═════════════════════════════════════════════════════════════════════════╗
 # ║  SECTION 8: STEP 6 — SUBTITLE GENERATION (ASS with karaoke)          ║
 # ╚═════════════════════════════════════════════════════════════════════════╝
@@ -976,18 +898,10 @@ def get_video_duration_safe(file_path: Path) -> float:
 def generate_ass_subtitles(audio_files: List[Dict],
                             output_path: Path,
                             margin_v: int = 400) -> str:
-    """Generate ASS subtitle file with word-by-word karaoke highlighting.
-    
-    Uses \k tags for karaoke effect:
-    - Unspoken words appear in SecondaryColour (white)
-    - Spoken/current word fills with PrimaryColour (cyan)
-    - Semi-transparent background box behind text (BorderStyle=3)
-    """
     log("Generating ASS subtitles with karaoke word highlighting...")
 
     ass_header = f"""[Script Info]
 ; ASS subtitle file for Ajeebology Shorts
-; Generated by automated pipeline
 ScriptType: v4.00+
 PlayResX: {VIDEO_WIDTH}
 PlayResY: {VIDEO_HEIGHT}
@@ -1014,11 +928,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             current_time += max(phrase_duration, 2.0)
             continue
 
-        # Calculate word timings
         word_timings = calculate_word_timings(phrase, phrase_duration)
 
-        # Build karaoke line with \k tags
-        # Format: {\kCS}word where CS = centiseconds
         karaoke_text = ""
         for wt in word_timings:
             cs = max(1, wt["duration_cs"])
@@ -1029,8 +940,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         start_time = current_time
         end_time = current_time + phrase_duration
-
-        # Format timestamps for ASS (H:MM:SS.cs)
         start_ass = format_time(start_time)
         end_ass = format_time(end_time)
 
@@ -1039,13 +948,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f"Karaoke,,0,0,0,,{karaoke_text}"
         )
         events.append(event)
-
         current_time = end_time
 
     total_duration = current_time
     ass_content = ass_header + "\n".join(events) + "\n"
 
-    # Write file
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(ass_content)
 
@@ -1057,11 +964,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 def build_drawtext_fallback(audio_files: List[Dict],
                              total_duration: float) -> str:
-    """Build ffmpeg drawtext filter chain as fallback (no libass needed).
-    
-    Each phrase gets a drawtext filter with enable='between(t,start,end)'.
-    This is less fancy than ASS karaoke but still professional-looking.
-    """
     log("Building drawtext subtitle filters (ASS fallback)...")
     filters = []
     current_time = 0.0
@@ -1071,7 +973,6 @@ def build_drawtext_fallback(audio_files: List[Dict],
         end_time = current_time + af["duration"]
         phrase = af["phrase"]
 
-        # Escape special chars for drawtext
         escaped = (phrase
                    .replace("'", "'\\\\\\''")
                    .replace(":", "\\:")
@@ -1109,12 +1010,18 @@ def apply_ken_burns(input_path: Path, output_path: Path,
                      target_duration: float,
                      zoom_start: float = 1.0,
                      zoom_end: float = 1.08) -> bool:
-    """Apply subtle Ken Burns zoom effect using ffmpeg zoompan."""
+    """Apply subtle Ken Burns zoom. Returns False if skipped."""
+    if target_duration <= 0:
+        log(f"  Skipping Ken Burns (duration={target_duration})", "WARN")
+        if input_path != output_path:
+            shutil.copy(str(input_path), str(output_path))
+        return True
+
     log(f"  Applying Ken Burns zoom ({zoom_start}→{zoom_end})...")
 
-    # zoompan: z='min(zoom+0.001, 1.5)' gradually zooms in
-    zoom_rate = (zoom_end - zoom_start) / (target_duration * VIDEO_FPS)
+    zoom_rate = (zoom_end - zoom_start) / (target_duration * VIDEO_FPS) if target_duration > 0 else 0
     zoom_expr = f"min({zoom_start}+{zoom_rate:.6f}*on,{zoom_end})"
+    frame_count = int(target_duration * VIDEO_FPS)
 
     success, _, _ = run_ffmpeg([
         "-stream_loop", "-1",
@@ -1124,7 +1031,7 @@ def apply_ken_burns(input_path: Path, output_path: Path,
         f"zoompan=z='{zoom_expr}':"
         f"x='iw/2-(iw/zoom/2)':"
         f"y='ih/2-(ih/zoom/2)':"
-        f"d={int(target_duration * VIDEO_FPS)}:"
+        f"d={frame_count}:"
         f"s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:"
         f"fps={VIDEO_FPS}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
@@ -1135,43 +1042,15 @@ def apply_ken_burns(input_path: Path, output_path: Path,
     return success
 
 
-def apply_color_grading(input_path: Path, output_path: Path) -> bool:
-    """Apply subtle color grading for brand consistency (purple/cyan tint)."""
-    log("  Applying color grading (brand purple/cyan)...")
-
-    # Use colorbalance and curves for cinematic look
-    success, _, _ = run_ffmpeg([
-        "-i", str(input_path),
-        "-vf",
-        "colorbalance=rs=-0.05:gs=-0.02:bs=0.08,"
-        "curves=vintage='0/0 0.2/0.15 0.8/0.85 1/1'",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-        "-pix_fmt", "yuv420p",
-        str(output_path)
-    ], timeout=120)
-
-    return success
-
-
 def create_intro_card(duration: float = 3.0,
                        text_line1: str = "Ajeebology Shorts",
                        text_line2: str = "Amazing Facts in Hinglish") -> bool:
-    """Create a branded intro card using ffmpeg (no PIL needed).
-    
-    3-second intro with:
-    - Purple gradient background
-    - Channel name in cyan
-    - Tagline in white
-    - Smooth fade in/out
-    """
     log(f"Creating intro card ({duration}s)...")
 
-    # Generate gradient background with text
     success, _, _ = run_ffmpeg([
         "-f", "lavfi",
         "-i", f"color=c={BRAND_PURPLE_HEX}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:"
               f"d={duration}:r={VIDEO_FPS}",
-        # Add subtle radial gradient overlay
         "-f", "lavfi",
         "-i", f"nullsrc=s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:d={duration}:r={VIDEO_FPS}",
         "-filter_complex",
@@ -1196,21 +1075,15 @@ def create_intro_card(duration: float = 3.0,
         log(f"  ✓ Intro card created")
     else:
         log(f"  Intro card failed", "WARN")
-
     return success
 
 
 def create_subscribe_overlay(duration: float = 4.0) -> bool:
-    """Create a subscribe animation overlay using ffmpeg drawscreen.
-    
-    Shows at the end of the video with a pulsing subscribe button.
-    """
     log(f"Creating subscribe overlay ({duration}s)...")
 
-    # Generate animated subscribe overlay
     success, _, _ = run_ffmpeg([
         "-f", "lavfi",
-        "-i", f"color=c=black@0:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:"
+        "-i", f"color=c=0x0D0618:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:"
               f"d={duration}:r={VIDEO_FPS}",
         "-vf",
         f"drawtext=text='Ajeebology Shorts':"
@@ -1238,39 +1111,6 @@ def create_subscribe_overlay(duration: float = 4.0) -> bool:
     return success
 
 
-def create_progress_bar_animation(total_duration: float,
-                                   bar_color: str = BRAND_CYAN_HEX) -> str:
-    """Return ffmpeg overlay filter for an animated bottom progress bar.
-    
-    The bar starts at x=-w (offscreen left) and slides to x=0 (full width)
-    over the duration of the video.
-    """
-    # Create a small colored bar image
-    bar_path = OUTPUT_DIR / "progress_bar.png"
-    bar_height = 4
-    bar_width = VIDEO_WIDTH
-
-    # Generate bar with ffmpeg
-    run_ffmpeg([
-        "-f", "lavfi",
-        "-i", f"color=c={bar_color}:s={bar_width}x{bar_height}:d=1",
-        "-vframes", "1",
-        str(bar_path)
-    ])
-
-    # Return overlay filter string
-    # x starts at -w (hidden) and goes to 0 (full width)
-    # y is at the very bottom of the video
-    overlay_filter = (
-        f"movie={bar_path}:loop=0:setpts=PTS-STARTPTS[bar];"
-        f"[in][bar]overlay="
-        f"x='-W+(W/{total_duration})*t':"
-        f"y=H-h-10:shortest=1"
-    )
-
-    return overlay_filter
-
-
 # ╔═════════════════════════════════════════════════════════════════════════╗
 # ║  SECTION 10: STEP 8 — FINAL VIDEO ASSEMBLY                            ║
 # ╚═════════════════════════════════════════════════════════════════════════╝
@@ -1279,26 +1119,15 @@ def assemble_final_video(
     stock_clips: List[Path],
     intro_video: Optional[Path],
     audio_path: Path,
-    subtitle_source: str,  # ASS file path OR drawtext filter string
+    subtitle_source: str,
     subscribe_overlay: Optional[Path],
     total_duration: float,
     output_path: Path
 ) -> bool:
-    """Assemble all components into the final video.
-    
-    Pipeline:
-    1. If multiple stock clips → crossfade between them
-    2. If intro exists → prepend it
-    3. Apply Ken Burns zoom to stock footage
-    4. Overlay subtitles (ASS or drawtext)
-    5. Overlay progress bar
-    6. Overlay subscribe CTA (last 4 seconds)
-    7. Mix with audio
-    """
     log("═══ FINAL VIDEO ASSEMBLY ═══")
 
-    # ── Step A: Process stock clips with Ken Burns ──
-    processed_clips = []
+    total_duration = max(total_duration, 10.0)  # minimum 10 seconds
+
     clips_dir = OUTPUT_DIR / "processed_clips"
     ensure_dir(clips_dir)
 
@@ -1319,29 +1148,24 @@ def assemble_final_video(
             "-pix_fmt", "yuv420p",
             str(fallback)
         ])
-        processed_clips.append(fallback)
-    else:
-        # Calculate duration per clip
-        clip_duration = total_duration / len(stock_clips)
-        for i, clip in enumerate(stock_clips):
-            processed = clips_dir / f"kenburns_{i:02d}.mp4"
-            log(f"  Processing clip {i+1}/{len(stock_clips)}...")
-            if apply_ken_burns(clip, processed, clip_duration):
-                processed_clips.append(processed)
-            else:
-                # Use raw clip if Ken Burns fails
-                log(f"  Ken Burns failed for clip {i+1}, using raw", "WARN")
-                processed_clips.append(clip)
+        stock_clips = [fallback]
 
-    # ── Step B: Concatenate clips with crossfade ──
+    # Process clips with Ken Burns
+    processed_clips = []
+    clip_duration = total_duration / len(stock_clips)
+    for i, clip in enumerate(stock_clips):
+        processed = clips_dir / f"kenburns_{i:02d}.mp4"
+        log(f"  Processing clip {i+1}/{len(stock_clips)}...")
+        if not apply_ken_burns(clip, processed, clip_duration):
+            log(f"  Using raw clip {i+1}", "WARN")
+            processed_clips.append(clip)
+        else:
+            processed_clips.append(processed)
+
+    # Concatenate clips if multiple
     if len(processed_clips) > 1:
         log("  Crossfading clips...")
         concat_base = clips_dir / "concatenated.mp4"
-        # Build xfade chain
-        filter_parts = []
-        for i in range(len(processed_clips)):
-            filter_parts.append(f"[{i}:v]")
-
         xfade_parts = []
         offset = 0
         for i in range(len(processed_clips) - 1):
@@ -1353,38 +1177,35 @@ def assemble_final_video(
             offset += clip_dur
 
         if xfade_parts:
-            xfade_filter = ";".join(xfade_parts)
+            xfade_filter = ";".join(xfade_parts) + "[outv]"
             input_files = []
             for clip in processed_clips:
                 input_files.extend(["-i", str(clip)])
 
             success, _, _ = run_ffmpeg(
                 input_files + [
-                    "-filter_complex", xfade_filter + "[outv]",
+                    "-filter_complex", xfade_filter,
                     "-map", "[outv]",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
                     "-pix_fmt", "yuv420p",
                     str(concat_base)
                 ], timeout=180
             )
-
             if success:
                 processed_clips = [concat_base]
             else:
-                log("  Crossfade failed, using simple concat", "WARN")
+                log("  Crossfade failed, using first clip only", "WARN")
     else:
-        log("  Single clip (or none) — no crossfade needed")
+        log("  Single clip — no crossfade needed")
 
-    # ── Step C: Prepend intro if available ──
+    # Prepend intro
     if intro_video and intro_video.exists():
         log("  Prepending intro card...")
         final_base = clips_dir / "with_intro.mp4"
-        # Concatenate intro + main video
         concat_file = clips_dir / "concat_videos.txt"
         with open(concat_file, "w") as f:
             f.write(f"file '{intro_video}'\n")
             f.write(f"file '{processed_clips[-1]}'\n")
-
         run_ffmpeg([
             "-f", "concat", "-safe", "0",
             "-i", str(concat_file),
@@ -1393,42 +1214,32 @@ def assemble_final_video(
         ])
         processed_clips = [final_base]
 
-    # ── Step D: Final composition ──
-    # Input: processed video + audio
-    # Filters: subtitles + progress bar + subscribe overlay + output
-    log("  Composing final video with overlays...")
-
+    # Final composition
     video_source = processed_clips[-1] if processed_clips else None
     if not video_source or not video_source.exists():
         log("No video source available!", "CRITICAL")
         return False
 
-    # Determine if we have ASS file or drawtext string
     is_ass = subtitle_source.endswith(".ass")
 
-    # Build filter complex
     if is_ass:
-        # ASS subtitles via subtitles filter
         subtitle_filter = f"subtitles={subtitle_source}"
     else:
-        # drawtext filter string
         subtitle_filter = subtitle_source
 
-    # Add subscribe overlay for last few seconds
     subscribe_duration = 4.0
     subscribe_start = max(0, total_duration - subscribe_duration)
     if subscribe_overlay and subscribe_overlay.exists():
-        subscribe_filter = (
+        full_filter = (
+            f"[0:v]{subtitle_filter}[subbed];"
             f"[subbed]"
             f"movie={subscribe_overlay}:loop=0:setpts=PTS-STARTPTS[sub];"
             f"[subbed][sub]overlay=0:0:shortest=1:"
             f"enable='between(t,{subscribe_start},{total_duration})'[outv]"
         )
-        full_filter = f"[0:v]{subtitle_filter}[subbed];{subscribe_filter}"
     else:
         full_filter = f"[0:v]{subtitle_filter}[outv]"
 
-    # Assemble!
     success, _, _ = run_ffmpeg([
         "-stream_loop", "-1",
         "-i", str(video_source),
@@ -1455,7 +1266,6 @@ def assemble_final_video(
 
 
 def generate_thumbnail(video_path: Path, output_path: Path) -> bool:
-    """Generate a thumbnail from the video at mid-point."""
     duration = get_media_duration(video_path)
     mid_point = duration / 2
 
@@ -1471,7 +1281,6 @@ def generate_thumbnail(video_path: Path, output_path: Path) -> bool:
 
 
 def verify_video(file_path: Path) -> bool:
-    """Verify the final video is valid and playable."""
     if not file_path.exists():
         log("Video file does not exist!", "ERROR")
         return False
@@ -1501,7 +1310,6 @@ def verify_video(file_path: Path) -> bool:
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 def send_telegram_message(text: str, parse_mode: str = "Markdown"):
-    """Send a text message to Telegram."""
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -1518,12 +1326,10 @@ def send_telegram_message(text: str, parse_mode: str = "Markdown"):
 
 
 def send_telegram_video(video_path: Path, caption: str) -> bool:
-    """Send the video file to Telegram."""
     file_size_mb = get_file_size_mb(video_path)
 
     if file_size_mb > 48:
-        log(f"Video too large for Telegram ({file_size_mb:.1f}MB > 48MB)",
-            "WARN")
+        log(f"Video too large ({file_size_mb:.1f}MB > 48MB)", "WARN")
         return False
 
     log(f"Sending video to Telegram ({file_size_mb:.1f} MB)...")
@@ -1537,8 +1343,6 @@ def send_telegram_video(video_path: Path, caption: str) -> bool:
                     "caption": caption[:1024],
                     "parse_mode": "Markdown",
                     "supports_streaming": True,
-                    "width": VIDEO_WIDTH,
-                    "height": VIDEO_HEIGHT,
                 },
                 files={"video": f},
                 timeout=300
@@ -1559,7 +1363,6 @@ def send_telegram_video(video_path: Path, caption: str) -> bool:
 
 def format_telegram_message(metadata: dict, duration: float,
                              file_size_mb: float) -> str:
-    """Format the full metadata message for Telegram."""
     date_str = datetime.now().strftime("%d %b %Y")
 
     message = (
@@ -1576,34 +1379,26 @@ def format_telegram_message(metadata: dict, duration: float,
         f"📥 **Download:** Check GitHub Actions artifacts (retention: 3 days)\n"
         f"📤 *Upload this video to YouTube Shorts manually*"
     )
-
     return message
 
 
 def deliver_to_telegram(metadata: dict, total_duration: float):
-    """Complete Telegram delivery with progress updates."""
     log("═══ TELEGRAM DELIVERY ═══")
 
-    # Check video
     if not FINAL_VIDEO.exists():
         log("Final video not found!", "ERROR")
         send_telegram_message(
-            "❌ *Pipeline Failed:* Final video was not generated.\n"
-            "Check GitHub Actions logs for details."
+            "❌ *Pipeline Failed:* Final video was not generated."
         )
         return
 
     file_size_mb = get_file_size_mb(FINAL_VIDEO)
     actual_duration = get_media_duration(FINAL_VIDEO)
-
-    # Format caption
     caption = format_telegram_message(metadata, actual_duration, file_size_mb)
 
-    # Try sending video
     sent = send_telegram_video(FINAL_VIDEO, caption)
 
     if not sent:
-        # Generate and send thumbnail instead
         log("Sending thumbnail with metadata instead...")
         if generate_thumbnail(FINAL_VIDEO, THUMBNAIL_FILE):
             try:
@@ -1621,12 +1416,10 @@ def deliver_to_telegram(metadata: dict, total_duration: float):
                 log("✓ Thumbnail sent")
             except Exception as e:
                 log(f"Thumbnail send failed: {e}", "ERROR")
-                # Last resort: just text
                 send_telegram_message(caption, parse_mode="Markdown")
         else:
             send_telegram_message(caption, parse_mode="Markdown")
 
-    # Send a brief success message
     send_telegram_message(
         f"✅ *Pipeline Complete* — {actual_duration:.0f}s video ready!\n"
         f"📁 Artifact: `output_video.mp4` in GitHub Actions",
@@ -1639,20 +1432,13 @@ def deliver_to_telegram(metadata: dict, total_duration: float):
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 async def run_pipeline():
-    """Execute the complete video generation pipeline."""
     pipeline_start = time.time()
     total_steps = 9
 
-    # ──────────────────────────────────────────
-    # STEP 1: RESEARCH
-    # ──────────────────────────────────────────
     log_step(1, total_steps, "RESEARCH")
     fact_context = research_fact()
     log(f"Research context: {len(fact_context)} chars")
 
-    # ──────────────────────────────────────────
-    # STEP 2: SCRIPT GENERATION
-    # ──────────────────────────────────────────
     log_step(2, total_steps, "SCRIPT GENERATION")
     script = generate_script(fact_context)
     script = validate_script(script)
@@ -1660,7 +1446,6 @@ async def run_pipeline():
     pexels_keyword = script.get("pexels_keyword", script.get("category", "facts"))
     log(f"Script: {len(phrases)} phrases, keyword: '{pexels_keyword}'")
 
-    # Save metadata for later
     metadata = {
         "title": script["title"],
         "category": script.get("category", "facts"),
@@ -1670,9 +1455,6 @@ async def run_pipeline():
         "hashtags": script.get("hashtags", "#facts"),
     }
 
-    # ──────────────────────────────────────────
-    # STEP 3: AUDIO GENERATION
-    # ──────────────────────────────────────────
     log_step(3, total_steps, "AUDIO GENERATION")
     audio_files = await generate_all_audio(phrases)
 
@@ -1684,21 +1466,14 @@ async def run_pipeline():
     metadata["duration"] = total_voice_duration
 
     if total_voice_duration < MIN_DURATION:
-        log(f"Voice audio short ({total_voice_duration:.0f}s), "
-            f"consider regenerating script", "WARN")
+        log(f"Voice audio short ({total_voice_duration:.0f}s), continuing anyway", "WARN")
 
-    # ──────────────────────────────────────────
-    # STEP 4: BACKGROUND MUSIC
-    # ──────────────────────────────────────────
     log_step(4, total_steps, "BACKGROUND MUSIC")
     music_path = fetch_background_music(total_voice_duration)
 
-    if music_path:
-        # Mix voice + music with ducking
+    if music_path and total_voice_duration > 5:
         log("Mixing voice + background music...")
-        success = apply_sidechain_ducking(
-            VOICE_AUDIO, music_path, FINAL_AUDIO
-        )
+        success = apply_sidechain_ducking(VOICE_AUDIO, music_path, FINAL_AUDIO)
         if not success:
             log("Audio mixing failed, using voice only", "WARN")
             shutil.copy(VOICE_AUDIO, FINAL_AUDIO)
@@ -1706,9 +1481,6 @@ async def run_pipeline():
         log("No background music, using voice only")
         shutil.copy(VOICE_AUDIO, FINAL_AUDIO)
 
-    # ──────────────────────────────────────────
-    # STEP 5: STOCK VIDEO
-    # ──────────────────────────────────────────
     log_step(5, total_steps, "STOCK VIDEO DOWNLOAD")
     stock_clips = download_stock_videos(
         pexels_keyword,
@@ -1718,9 +1490,6 @@ async def run_pipeline():
     )
     log(f"Stock clips downloaded: {len(stock_clips)}")
 
-    # ──────────────────────────────────────────
-    # STEP 6: INTRO CARD
-    # ──────────────────────────────────────────
     log_step(6, total_steps, "INTRO & OVERLAYS")
     create_intro_card(
         duration=3.0,
@@ -1729,21 +1498,17 @@ async def run_pipeline():
     )
     create_subscribe_overlay(duration=4.0)
 
-    # ──────────────────────────────────────────
-    # STEP 7: SUBTITLES
-    # ──────────────────────────────────────────
     log_step(7, total_steps, "SUBTITLES")
-    # Generate ASS subtitles with karaoke
     generate_ass_subtitles(audio_files, SUBTITLES_FILE, margin_v=400)
     subtitle_source = str(SUBTITLES_FILE)
 
-    # Check if ASS will work (test ffmpeg with libass)
+    # Test if libass works with a valid size
     ass_test = OUTPUT_DIR / "ass_test.txt"
     with open(ass_test, "w") as f:
         f.write("[Script Info]\nScriptType: v4.00+\n")
     has_libass = False
     success, _, _ = run_ffmpeg([
-        "-f", "lavfi", "-i", "color=c=black:s=1x1:d=0.1",
+        "-f", "lavfi", "-i", "color=c=black:s=8x8:d=0.2",
         "-vf", f"subtitles={ass_test}",
         "-f", "null", "-"
     ])
@@ -1751,20 +1516,12 @@ async def run_pipeline():
         has_libass = True
         log("  ✓ libass available — using ASS karaoke subtitles")
     else:
-        log("  libass NOT available — falling back to drawtext subtitles", "WARN")
-        subtitle_source = build_drawtext_fallback(
-            audio_files, total_voice_duration
-        )
+        log("  libass NOT available — falling back to drawtext", "WARN")
+        subtitle_source = build_drawtext_fallback(audio_files, total_voice_duration)
 
-    # ──────────────────────────────────────────
-    # STEP 8: FINAL ASSEMBLY
-    # ──────────────────────────────────────────
     log_step(8, total_steps, "FINAL VIDEO ASSEMBLY")
 
-    # Determine the audio to use
     audio_to_use = FINAL_AUDIO if FINAL_AUDIO.exists() else VOICE_AUDIO
-
-    # Check if we have a subscribe overlay
     sub_overlay = SUBSCRIBE_OVERLAY if SUBSCRIBE_OVERLAY.exists() else None
 
     success = assemble_final_video(
@@ -1779,26 +1536,16 @@ async def run_pipeline():
 
     if not success:
         log("FINAL ASSEMBLY FAILED!", "CRITICAL")
-        send_telegram_message(
-            "❌ *Pipeline Failed:* Video assembly error.\n"
-            "Check GitHub Actions logs."
-        )
+        send_telegram_message("❌ *Pipeline Failed:* Video assembly error.")
         return
 
-    # Verify output
     if not verify_video(FINAL_VIDEO):
         log("Video verification failed!", "CRITICAL")
         return
 
-    # ──────────────────────────────────────────
-    # STEP 9: DELIVERY
-    # ──────────────────────────────────────────
     log_step(9, total_steps, "TELEGRAM DELIVERY")
     deliver_to_telegram(metadata, total_voice_duration)
 
-    # ──────────────────────────────────────────
-    # SUMMARY
-    # ──────────────────────────────────────────
     elapsed = time.time() - pipeline_start
     log("")
     log("═" * 55)
@@ -1813,14 +1560,12 @@ async def run_pipeline():
     log(f"  Title:         {metadata['title']}")
     log("═" * 55)
 
-    # Save metadata JSON
     metadata["pipeline_duration_s"] = round(elapsed)
     metadata["video_duration_s"] = round(get_media_duration(FINAL_VIDEO))
     metadata["file_size_mb"] = round(get_file_size_mb(FINAL_VIDEO), 1)
     with open(METADATA_FILE, "w") as f:
         json.dump(metadata, f, indent=2)
 
-    # Cleanup temporary files (keep final video + metadata)
     clean_temp_files(keep=[FINAL_VIDEO, METADATA_FILE, LOG_FILE])
     log("Cleanup complete")
 
@@ -1830,12 +1575,9 @@ async def run_pipeline():
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 async def main():
-    """Main entry point with top-level error handling."""
     try:
-        # Set up output directory
         ensure_dir(OUTPUT_DIR)
 
-        # Log startup info
         log("")
         log("╔══════════════════════════════════════════════════════════╗")
         log("║     🎬 AJEEBOLOGY SHORTS — PREMIUM VIDEO PIPELINE      ║")
@@ -1847,7 +1589,6 @@ async def main():
         log(f"Date:          {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         log("")
 
-        # Validate API keys
         missing_keys = []
         for key_name in ["GROQ_API_KEY", "TAVILY_API_KEY", "PEXELS_API_KEY",
                           "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"]:
@@ -1855,27 +1596,21 @@ async def main():
                 missing_keys.append(key_name)
         if missing_keys:
             log(f"MISSING API KEYS: {', '.join(missing_keys)}", "CRITICAL")
-            log("Set these in GitHub Actions secrets and rerun.", "CRITICAL")
             sys.exit(1)
 
         log("✓ All API keys found")
-
-        # Run pipeline
         await run_pipeline()
 
     except Exception as e:
         log(f"❌ UNHANDLED PIPELINE ERROR: {e}", "CRITICAL")
         log(traceback.format_exc(), "CRITICAL")
-
         try:
             send_telegram_message(
-                f"❌ *Pipeline Crashed:*\n`{str(e)[:200]}`\n\n"
-                f"Check GitHub Actions logs for full traceback.",
+                f"❌ *Pipeline Crashed:*\n`{str(e)[:200]}`",
                 parse_mode="Markdown"
             )
         except Exception:
             pass
-
         sys.exit(1)
 
 
