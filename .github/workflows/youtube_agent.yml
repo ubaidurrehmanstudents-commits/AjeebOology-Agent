@@ -2,7 +2,6 @@ name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
-    # 8:45 AM UTC = 1:45 PM PKT (runs before 5 PM upload time)
     - cron: '45 8 * * *'
   workflow_dispatch:
     inputs:
@@ -19,32 +18,46 @@ jobs:
   build-and-deliver:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
-
+    
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: 'pip'
-
+    
     - name: Install system dependencies
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq           ffmpeg           libsm6           libxext6           libgl1-mesa-glx           libfontconfig1           libxrender1           fonts-dejavu-core           fonts-liberation           fonts-freefont-ttf           fonts-noto-core
+        sudo apt-get install -y -qq \
+          ffmpeg \
+          libsm6 \
+          libxext6 \
+          libgl1 \
+          libfontconfig1 \
+          libxrender1 \
+          fonts-dejavu-core \
+          fonts-liberation \
+          fonts-freefont-ttf \
+          fonts-noto-core
         ffmpeg -version | head -1
-
+    
     - name: Install Python dependencies
       run: |
         pip install --upgrade pip
-        pip install           requests           Pillow           numpy           edge-tts           openai-whisper
+        pip install \
+          requests \
+          Pillow \
+          numpy \
+          edge-tts \
+          openai-whisper
         python -c "import PIL; print('Pillow:', PIL.__version__)"
         python -c "import numpy; print('NumPy:', numpy.__version__)"
-
+    
     - name: Cache downloaded assets
       uses: actions/cache@v4
       with:
@@ -52,7 +65,7 @@ jobs:
         key: ajeebology-assets-${{ github.run_id }}
         restore-keys: |
           ajeebology-assets-
-
+    
     - name: Run Ajeebology Pipeline
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -66,23 +79,23 @@ jobs:
         echo "Starting Ajeebology Shorts Pipeline..."
         echo "Run ID: $GITHUB_RUN_ID"
         echo "Repository: $GITHUB_REPOSITORY"
-
+        
         mkdir -p output
-
+        
         python youtube_agent.py
-
+        
         if [ -f /tmp/ajeebology/output/output_video.mp4 ]; then
           cp /tmp/ajeebology/output/output_video.mp4 output/
           echo "Video copied to output/"
         fi
-
+        
         if [ -f /tmp/ajeebology/output/thumbnail.jpg ]; then
           cp /tmp/ajeebology/output/thumbnail.jpg output/
           echo "Thumbnail copied to output/"
         fi
-
+        
         ls -lh output/
-
+    
     - name: Upload video artifact
       uses: actions/upload-artifact@v4
       if: always()
@@ -93,7 +106,7 @@ jobs:
           output/thumbnail.jpg
         retention-days: 7
         if-no-files-found: warn
-
+    
     - name: Cleanup temporary files
       if: always()
       run: |
@@ -101,7 +114,7 @@ jobs:
         rm -rf /tmp/ajeebology/frames
         du -sh /tmp/ajeebology/ 2>/dev/null || true
         df -h
-
+    
     - name: Notify on failure
       if: failure()
       env:
@@ -109,4 +122,9 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         echo "Pipeline failed. Sending notification..."
-        curl -s -X POST           "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage"           -d "chat_id=${TELEGRAM_CHAT_ID}"           -d "parse_mode=HTML"           -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0ARepository: ${{ github.repository }}%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>"           || true
+        curl -s -X POST \
+          "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+          -d "chat_id=${TELEGRAM_CHAT_ID}" \
+          -d "parse_mode=HTML" \
+          -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0ARepository: ${{ github.repository }}%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>" \
+          || true
