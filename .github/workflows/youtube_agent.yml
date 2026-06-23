@@ -1,31 +1,24 @@
-name: 🎬 Ajeebology Shorts — Premium Video Pipeline
+name: 🎬 Ajeebology Shorts — Daily Video Pipeline
 
 on:
   schedule:
-    - cron: '45 8 * * *'
+    - cron: '45 8 * * *'   # 1:45 PM PKT
   workflow_dispatch:
-    inputs:
-      debug_mode:
-        description: 'Keep all temp files for debugging'
-        type: boolean
-        default: false
 
 env:
-  GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
-  TAVILY_API_KEY:     ${{ secrets.TAVILY_API_KEY }}
-  PEXELS_API_KEY:     ${{ secrets.PEXELS_API_KEY }}
-  TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
-  TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-  PYTHONUNBUFFERED:   1
+  GROQ_API_KEY:     ${{ secrets.GROQ_API_KEY }}
+  TAVILY_API_KEY:   ${{ secrets.TAVILY_API_KEY }}
+  PEXELS_API_KEY:   ${{ secrets.PEXELS_API_KEY }}
+  TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  PYTHONUNBUFFERED: 1
 
 jobs:
   build:
-    name: Generate YouTube Short
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
-      - name: 📥 Checkout repository
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
       - name: 🐍 Setup Python 3.11
@@ -36,25 +29,21 @@ jobs:
       - name: 🔧 Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            ffmpeg fonts-dejavu-core libass-dev \
-            --no-install-recommends
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core --no-install-recommends
 
       - name: 📦 Install Python deps
-        run: |
-          python -m pip install --upgrade pip --quiet
-          pip install edge-tts requests --quiet
+        run: pip install edge-tts requests --quiet
 
-      - name: ✅ Verify setup
+      - name: ✅ Verify
         run: |
-          python3 -c "import edge_tts; print('✓ edge-tts OK')"
-          python3 -c "import requests; print('✓ requests OK')"
-          ffmpeg -version > /dev/null 2>&1 && echo "✓ ffmpeg OK"
+          python3 -c "import edge_tts; print('✓ edge-tts')"
+          python3 -c "import requests; print('✓ requests')"
+          ffmpeg -version > /dev/null 2>&1 && echo "✓ ffmpeg"
 
-      - name: 🎬 Run video pipeline
+      - name: 🎬 Run pipeline
         run: python3 youtube_agent.py
 
-      - name: 📤 Upload artifacts
+      - name: 📤 Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -65,16 +54,6 @@ jobs:
             /tmp/ajeebology_output/pipeline.log
           if-no-files-found: warn
           retention-days: 3
-          compression-level: 0
-
-      - name: 🔍 Upload debug artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ajeebology-debug
-          path: /tmp/ajeebology_output/
-          if-no-files-found: warn
-          retention-days: 1
 
       - name: ❌ Failure notification
         if: failure()
