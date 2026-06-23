@@ -11,16 +11,12 @@ on:
         default: false
 
 env:
-  # ── API Keys (stored in GitHub Secrets) ──
   GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
   TAVILY_API_KEY:     ${{ secrets.TAVILY_API_KEY }}
   PEXELS_API_KEY:     ${{ secrets.PEXELS_API_KEY }}
   TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
   TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-
-  # ── Python Configuration ──
   PYTHONUNBUFFERED:   1
-  PIP_CACHE_DIR:      ~/.cache/pip
 
 jobs:
   build:
@@ -33,15 +29,14 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Set up Python with caching ──
+      # ── 2. Set up Python (NO cache — needs requirements.txt) ──
       - name: 🐍 Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip'
 
       # ── 3. Install system dependencies ──
-      - name: 🔧 Install system dependencies
+      - name: 🔧 Install system deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -49,51 +44,28 @@ jobs:
             fonts-dejavu-core \
             libass-dev \
             --no-install-recommends
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "FFmpeg version: $(ffmpeg -version 2>&1 | head -1)"
-          echo "Python version: $(python3 --version)"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "FFmpeg: $(ffmpeg -version 2>&1 | head -1)"
 
       # ── 4. Install Python dependencies ──
-      - name: 📦 Install Python dependencies
+      - name: 📦 Install Python deps
         run: |
           python -m pip install --upgrade pip --quiet
-          pip install \
-            edge-tts \
-            requests \
-            --quiet
+          pip install edge-tts requests --quiet
 
-      # ── 5. Verify all tools ──
-      - name: ✅ Verify toolchain
+      # ── 5. Verify toolchain ──
+      - name: ✅ Verify setup
         run: |
-          echo "Testing ffmpeg libass support..."
-          echo "[Script Info]
-          ScriptType: v4.00+" > /tmp/ass_test.ass
-          ffmpeg -hide_banner -loglevel error \
-            -f lavfi -i "color=c=black:s=1x1:d=0.1" \
-            -vf "subtitles=/tmp/ass_test.ass" \
-            -f null - 2>&1 && \
-            echo "✓ libass supported" || \
-            echo "⚠ libass NOT supported (will use drawtext fallback)"
-          
-          echo ""
-          echo "Testing edge-tts import..."
-          python3 -c "import edge_tts; print('✓ edge-tts', edge_tts.__version__)" 2>&1 || \
-            echo "⚠ edge-tts import failed"
-          
-          echo ""
-          echo "FFmpeg codecs:"
-          ffmpeg -encoders 2>/dev/null | grep -E "aac|libx264" | head -5 || true
+          python3 -c "import edge_tts; print('✓ edge-tts OK')"
+          python3 -c "import requests; print('✓ requests OK')"
+          ffmpeg -f lavfi -i "color=c=black:s=1x1:d=0.1" \
+            -f null - 2>&1 && echo "✓ ffmpeg OK"
 
-      # ── 6. Run the main pipeline ──
+      # ── 6. Run pipeline ──
       - name: 🎬 Run video pipeline
-        id: pipeline
-        run: |
-          python3 youtube_agent.py 2>&1
-        shell: bash
+        run: python3 youtube_agent.py
 
-      # ── 7. Upload output artifacts ──
-      - name: 📤 Upload output artifacts
+      # ── 7. Upload artifacts ──
+      - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -106,50 +78,22 @@ jobs:
           retention-days: 3
           compression-level: 0
 
-      # ── 8. Upload debug artifacts (if enabled or on failure) ──
+      # ── 8. Debug artifacts on failure ──
       - name: 🔍 Upload debug artifacts
-        if: |
-          (github.event_name == 'workflow_dispatch' && 
-           github.event.inputs.debug_mode == 'true') ||
-          failure()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ajeebology-debug
-          path: |
-            /tmp/ajeebology_output/
+          path: /tmp/ajeebology_output/
           if-no-files-found: warn
           retention-days: 1
 
       # ── 9. Notify on failure ──
-      - name: ❌ Notify on failure
+      - name: ❌ Failure notification
         if: failure()
         run: |
-          MESSAGE="❌ *Pipeline Failed* — Ajeebology Shorts daily video could not be generated.%0A%0A🔍 Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="❌ *Pipeline Failed* — Ajeebology Shorts%0A%0A🔍 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=$MESSAGE" \
-            -d "parse_mode=Markdown" \
-            --max-time 10 || true
-
-      # ── 10. Summary ──
-      - name: 📊 Pipeline summary
-        if: always()
-        run: |
-          echo ""
-          echo "═══════════════════════════════════════════════"
-          echo "  AJEEBOLOGY SHORTS — PIPELINE SUMMARY"
-          echo "═══════════════════════════════════════════════"
-          if [ -f /tmp/ajeebology_output/output_video.mp4 ]; then
-            SIZE=$(du -h /tmp/ajeebology_output/output_video.mp4 | cut -f1)
-            DUR=$(ffprobe -v error -show_entries format=duration \
-              -of default=noprint_wrappers=1:nokey=1 \
-              /tmp/ajeebology_output/output_video.mp4 2>/dev/null || echo "?")
-            echo "  ✓ Video generated: $SIZE, ${DUR}s"
-          else
-            echo "  ✗ No video generated"
-          fi
-          if [ -f /tmp/ajeebology_output/metadata.json ]; then
-            TITLE=$(python3 -c "import json; d=json.load(open('/tmp/ajeebology_output/metadata.json')); print(d.get('title','?'))" 2>/dev/null || echo "?")
-            echo "  Title: $TITLE"
-          fi
-          echo "═══════════════════════════════════════════════"
+            -d "text=$MSG" \
+            -d "parse_mode=Markdown" --max-time 10 || true
