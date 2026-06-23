@@ -21,7 +21,7 @@ SECRETS REQUIRED (all free):
   PEXELS_API_KEY, UNSPLASH_ACCESS_KEY (optional)
 
 AUTHOR: Ajeebology Agent
-VERSION: 3.0.0
+VERSION: 3.0.1
 """
 
 import os
@@ -143,19 +143,19 @@ class Logger:
         self.log_file = Config.LOGS_DIR / f"pipeline_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
     
     def info(self, msg: str, **kwargs):
-        print(f"ℹ️  {msg}")
+        print(f"INFO: {msg}")
         self._write("INFO", msg, kwargs)
     
     def success(self, msg: str, **kwargs):
-        print(f"✅ {msg}")
+        print(f"SUCCESS: {msg}")
         self._write("SUCCESS", msg, kwargs)
     
     def warning(self, msg: str, **kwargs):
-        print(f"⚠️  {msg}")
+        print(f"WARNING: {msg}")
         self._write("WARNING", msg, kwargs)
     
     def error(self, msg: str, **kwargs):
-        print(f"❌ {msg}")
+        print(f"ERROR: {msg}")
         self._write("ERROR", msg, kwargs)
     
     def _write(self, level: str, msg: str, data: dict):
@@ -280,7 +280,6 @@ class TrendingAgent:
                 posts = r.json().get("data", {}).get("children", [])
                 titles = [p.get("data", {}).get("title", "") for p in posts if p.get("data", {}).get("title")]
                 
-                # Filter by category relevance
                 keywords = {
                     "psychology": ["mind", "brain", "psychology", "behavior", "mental"],
                     "space": ["space", "mars", "nasa", "star", "planet", "galaxy"],
@@ -398,18 +397,18 @@ class ResearchAgent:
 # =============================================================================
 
 class ScriptAgent:
-    SYSTEM_PROMPT = """You are a viral YouTube Shorts scriptwriter for "Ajeebology Shorts".
+    SYSTEM_PROMPT = """You are a viral YouTube Shorts scriptwriter for Ajeebology Shorts.
 Scripts are in HINGLISH (Roman Hindi + English mix), optimized for maximum retention.
 
 RULES:
 1. Hinglish only (Roman Hindi + English words)
-2. HOOK: Pattern interrupt in first 1-2 seconds (shocking, question, "Wait!")
+2. HOOK: Pattern interrupt in first 1-2 seconds (shocking, question, Wait!)
 3. FACTS: Mind-blowing, concise, max 8 words per sentence
 4. OUTRO: Strong CTA with urgency
 5. Mark EMPHASIS with [WORD] brackets for visual highlighting
 6. Short punchy sentences with commas for pauses
 7. Conversational tone like telling a secret to a friend
-8. "Loop hook": Last sentence hints at first frame
+8. Loop hook: Last sentence hints at first frame
 9. Power words: SHOCKING, BANNED, SECRET, MILLIONAIRE, INSTANTLY
 
 OUTPUT JSON:
@@ -418,8 +417,8 @@ OUTPUT JSON:
     "category": "psychology|space|weird_facts|dark_psychology|money_hacks",
     "seo_title": "English SEO title with power words",
     "description": "English description with keywords",
-    "tags": ["tag1", "tag2", ...],
-    "hashtags": ["#tag1", "#tag2", ...],
+    "tags": ["tag1", "tag2"],
+    "hashtags": ["#tag1", "#tag2"],
     "segments": [
         {"type": "hook", "text": "Hinglish with [emphasis] words", "broll_prompt": "English video search prompt"},
         {"type": "fact1", "text": "...", "broll_prompt": "..."},
@@ -439,14 +438,14 @@ Title: {research['title']}
 Content: {research['content']}{hint}
 
 CRITICAL:
-1. First sentence MUST be pattern interrupt ("Wait!", "Shocking!", "Banned!")
+1. First sentence MUST be pattern interrupt (Wait!, Shocking!, Banned!)
 2. Max 8 words per sentence, use commas for pauses
 3. At least 3 [emphasis] words for visual pop
 4. End loops back to hook
 5. Like a friend revealing a secret
 
-Example hook: "[Wait!] Kya aap jaante hain, aapka brain har [13 milliseconds] mein image process kar sakta hai?"
-Example bad: "Aaj hum psychology ke baare mein baat karenge...""""
+Example hook: [Wait!] Kya aap jaante hain, aapka brain har [13 milliseconds] mein image process kar sakta hai?
+Example bad: Aaj hum psychology ke baare mein baat karenge..."""
         
         try:
             r = requests.post("https://api.groq.com/openai/v1/chat/completions", json={
@@ -495,39 +494,39 @@ Example bad: "Aaj hum psychology ke baare mein baat karenge...""""
         cat = research.get("category", "weird_facts")
         templates = {
             "psychology": [
-                ScriptSegment("[Wait!] Kya aap jaante hain, aapka brain har [13 milliseconds] mein image process kar sakta hai?", "hook", ["Wait!", "13 milliseconds"], "human brain neural pathways futuristic"),
-                ScriptSegment("Psychology experiment mein dekha ki [false memories] create karna kitna aasan hai!", "fact1", ["false memories"], "psychology experiment memory brain"),
-                ScriptSegment("Forcefully [smile] karte hain toh brain [happy hormones] release kar deta hai!", "fact2", ["smile", "happy hormones"], "person smiling happiness joy"),
-                ScriptSegment("Aapke decisions ka [90%] subconscious mind control karta hai!", "fact3", ["90%", "subconscious mind"], "subconscious mind brain visualization"),
-                ScriptSegment("Ye facts pasand aaye toh [subscribe] karo, comments mein shocking fact batao!", "outro", ["subscribe"], "youtube subscribe button animation")
+                ScriptSegment("Wait! Kya aap jaante hain, aapka brain har 13 milliseconds mein image process kar sakta hai?", "hook", ["Wait!", "13 milliseconds"], "human brain neural pathways futuristic"),
+                ScriptSegment("Psychology experiment mein dekha ki false memories create karna kitna aasan hai!", "fact1", ["false memories"], "psychology experiment memory brain"),
+                ScriptSegment("Forcefully smile karte hain toh brain happy hormones release kar deta hai!", "fact2", ["smile", "happy hormones"], "person smiling happiness joy"),
+                ScriptSegment("Aapke decisions ka 90% subconscious mind control karta hai!", "fact3", ["90%", "subconscious mind"], "subconscious mind brain visualization"),
+                ScriptSegment("Ye facts pasand aaye toh subscribe karo, comments mein shocking fact batao!", "outro", ["subscribe"], "youtube subscribe button animation")
             ],
             "space": [
-                ScriptSegment("[Shocking!] Venus par ek din [243 days] ka, saal sirf [225 days] ka!", "hook", ["Shocking!", "243 days", "225 days"], "venus planet space rotation"),
-                ScriptSegment("Neutron stars [600 baar] per second spin karti hain!", "fact1", ["600 baar"], "neutron star spinning galaxy"),
-                ScriptSegment("Earth par trees [Milky Way] stars se zyada hain!", "fact2", ["Milky Way"], "milky way galaxy earth forest"),
-                ScriptSegment("Space mein [alcohol cloud] hai, value [1000 trillion dollars]!", "fact3", ["alcohol cloud", "1000 trillion dollars"], "space nebula cloud colorful"),
-                ScriptSegment("Amazing space facts ke liye [follow] karo Ajeebology!", "outro", ["follow"], "space astronaut earth view")
+                ScriptSegment("Shocking! Venus par ek din 243 days ka, saal sirf 225 days ka!", "hook", ["Shocking!", "243 days", "225 days"], "venus planet space rotation"),
+                ScriptSegment("Neutron stars 600 baar per second spin karti hain!", "fact1", ["600 baar"], "neutron star spinning galaxy"),
+                ScriptSegment("Earth par trees Milky Way stars se zyada hain!", "fact2", ["Milky Way"], "milky way galaxy earth forest"),
+                ScriptSegment("Space mein alcohol cloud hai, value 1000 trillion dollars!", "fact3", ["alcohol cloud", "1000 trillion dollars"], "space nebula cloud colorful"),
+                ScriptSegment("Amazing space facts ke liye follow karo Ajeebology!", "outro", ["follow"], "space astronaut earth view")
             ],
             "weird_facts": [
-                ScriptSegment("[Unbelievable!] Honey kabhi [spoil] nahi hota, [3000 saal] purana honey khaya tha!", "hook", ["Unbelievable!", "spoil", "3000 saal"], "honey jar ancient golden"),
-                ScriptSegment("Wombat ka poop [cube-shaped] hota hai, nature ka sabse weird!", "fact1", ["cube-shaped"], "wombat animal australia cute"),
-                ScriptSegment("Banana [berry] hai, lekin strawberry nahi!", "fact2", ["berry"], "banana fruit close up yellow"),
-                ScriptSegment("Octopus ke paas [teen dil] hain, blood [blue] hota hai!", "fact3", ["teen dil", "blue"], "octopus underwater ocean colorful"),
-                ScriptSegment("[Mind-blowing] facts ke liye channel subscribe karo!", "outro", ["Mind-blowing"], "shocked surprised face reaction")
+                ScriptSegment("Unbelievable! Honey kabhi spoil nahi hota, 3000 saal purana honey khaya tha!", "hook", ["Unbelievable!", "spoil", "3000 saal"], "honey jar ancient golden"),
+                ScriptSegment("Wombat ka poop cube-shaped hota hai, nature ka sabse weird!", "fact1", ["cube-shaped"], "wombat animal australia cute"),
+                ScriptSegment("Banana berry hai, lekin strawberry nahi!", "fact2", ["berry"], "banana fruit close up yellow"),
+                ScriptSegment("Octopus ke paas teen dil hain, blood blue hota hai!", "fact3", ["teen dil", "blue"], "octopus underwater ocean colorful"),
+                ScriptSegment("Mind-blowing facts ke liye channel subscribe karo!", "outro", ["Mind-blowing"], "shocked surprised face reaction")
             ],
             "dark_psychology": [
-                ScriptSegment("[Warning!] Ye [dark psychology] tricks log aapke against use karte hain!", "hook", ["Warning!", "dark psychology"], "dark shadowy figure mysterious"),
-                ScriptSegment("[Door-in-the-face]: Pehle bada maango, phir chhota, [90%] log maan jaate hain!", "fact1", ["Door-in-the-face", "90%"], "manipulation psychology dark room"),
-                ScriptSegment("Body language [mirror] karna trust instantly banata hai, [unconscious] hota hai!", "fact2", ["mirror", "unconscious"], "people talking mirror body language"),
-                ScriptSegment("[FOMO] billion-dollar manipulation tool hai, companies aapko control karti hain!", "fact3", ["FOMO"], "phone notification social media addiction"),
-                ScriptSegment("Aise secrets ke liye [subscribe] karo, friends ko bhi batao!", "outro", ["subscribe"], "secret whispering friends group")
+                ScriptSegment("Warning! Ye dark psychology tricks log aapke against use karte hain!", "hook", ["Warning!", "dark psychology"], "dark shadowy figure mysterious"),
+                ScriptSegment("Door-in-the-face: Pehle bada maango, phir chhota, 90% log maan jaate hain!", "fact1", ["Door-in-the-face", "90%"], "manipulation psychology dark room"),
+                ScriptSegment("Body language mirror karna trust instantly banata hai, unconscious hota hai!", "fact2", ["mirror", "unconscious"], "people talking mirror body language"),
+                ScriptSegment("FOMO billion-dollar manipulation tool hai, companies aapko control karti hain!", "fact3", ["FOMO"], "phone notification social media addiction"),
+                ScriptSegment("Aise secrets ke liye subscribe karo, friends ko bhi batao!", "outro", ["subscribe"], "secret whispering friends group")
             ],
             "money_hacks": [
-                ScriptSegment("[Secret!] Rich log ye [money rules] aapko nahi batana chahte!", "hook", ["Secret!", "money rules"], "money cash gold luxury"),
-                ScriptSegment("[50/30/20 rule]: 50% needs, 30% wants, 20% savings, millionaires follow karte hain!", "fact1", ["50/30/20 rule"], "budget planning calculator money"),
-                ScriptSegment("[Compound interest] aapko 40 tak millionaire bana sakta hai!", "fact2", ["Compound interest"], "graph growing money chart"),
-                ScriptSegment("Richest logon ke paas [7 income streams] hoti hain average!", "fact3", ["7 income streams"], "multiple income streams business"),
-                ScriptSegment("[Wealth secrets] ke liye Ajeebology ko follow karo!", "outro", ["Wealth secrets"], "rich lifestyle mansion car")
+                ScriptSegment("Secret! Rich log ye money rules aapko nahi batana chahte!", "hook", ["Secret!", "money rules"], "money cash gold luxury"),
+                ScriptSegment("50/30/20 rule: 50% needs, 30% wants, 20% savings, millionaires follow karte hain!", "fact1", ["50/30/20 rule"], "budget planning calculator money"),
+                ScriptSegment("Compound interest aapko 40 tak millionaire bana sakta hai!", "fact2", ["Compound interest"], "graph growing money chart"),
+                ScriptSegment("Richest logon ke paas 7 income streams hoti hain average!", "fact3", ["7 income streams"], "multiple income streams business"),
+                ScriptSegment("Wealth secrets ke liye Ajeebology ko follow karo!", "outro", ["Wealth secrets"], "rich lifestyle mansion car")
             ]
         }
         
@@ -560,7 +559,6 @@ class VoiceAgent:
             raw = str(Config.AUDIO_DIR / f"seg_{i:02d}_raw.mp3")
             processed = str(Config.AUDIO_DIR / f"seg_{i:02d}.mp3")
             
-            # Generate with Edge-TTS
             if self._edge_tts(text, raw):
                 self._enhance(raw, processed, seg.seg_type)
                 if os.path.exists(processed):
@@ -602,14 +600,12 @@ class VoiceAgent:
             return False
     
     def _enhance(self, input_path: str, output_path: str, seg_type: str):
-        """Apply professional audio effects via FFmpeg."""
         filters = {
             "hook": "highpass=f=80,equalizer=f=3000:width_type=h:width=200:g=3,equalizer=f=8000:width_type=h:width=1000:g=2,dynaudnorm,loudnorm=I=-16:TP=-1.5:LRA=7",
             "outro": "highpass=f=80,equalizer=f=250:width_type=h:width=100:g=2,dynaudnorm,loudnorm=I=-16:TP=-1.5:LRA=7",
             "default": "highpass=f=80,equalizer=f=3000:width_type=h:width=200:g=2,dynaudnorm,loudnorm=I=-16:TP=-1.5:LRA=7"
         }
         
-        # Compress pauses first
         if PYDUB_AVAILABLE:
             try:
                 audio = PydubAudioSegment.from_mp3(input_path)
@@ -630,7 +626,6 @@ class VoiceAgent:
             except Exception as e:
                 log.warning(f"Pause compression failed: {e}")
         
-        # Apply effects
         f = filters.get(seg_type, filters["default"])
         rc, _, _ = run_cmd([
             "ffmpeg", "-y", "-i", input_path, "-af", f,
@@ -647,7 +642,6 @@ class VoiceAgent:
         ])
     
     def mix(self, segments: List[AudioSegment], bg_music: str = None) -> str:
-        # Concatenate voice
         concat = Config.AUDIO_DIR / "concat.txt"
         with open(concat, "w") as f:
             for seg in segments:
@@ -661,7 +655,6 @@ class VoiceAgent:
         
         voice_dur = get_audio_duration(voice)
         
-        # Mix with background music (ducking)
         if bg_music and os.path.exists(bg_music):
             final = str(Config.AUDIO_DIR / "final.mp3")
             fade_start = max(0, voice_dur - 5)
@@ -718,7 +711,6 @@ class AssetAgent:
         safe = safe_filename(prompt)[:30]
         dest = str(Config.ASSETS_DIR / f"img_{index:02d}_{safe}.jpg")
         
-        # Try Unsplash
         if Config.UNSPLASH_ACCESS_KEY:
             try:
                 url = f"https://api.unsplash.com/search/photos?query={quote_plus(prompt)}&per_page=5&orientation=portrait"
@@ -730,7 +722,6 @@ class AssetAgent:
             except Exception as e:
                 log.warning(f"Unsplash failed: {e}")
         
-        # Fallback to Pollinations AI
         if Config.USE_POLLINATIONS:
             try:
                 enhanced = f"cinematic professional photo, {prompt}, high quality, dramatic lighting, 8k"
@@ -740,7 +731,6 @@ class AssetAgent:
             except Exception as e:
                 log.warning(f"Pollinations failed: {e}")
         
-        # Fallback to Pixabay
         if Config.USE_PIXABAY_BACKUP:
             try:
                 url = f"https://pixabay.com/api/?q={quote_plus(prompt)}&image_type=photo&orientation=vertical&per_page=5"
@@ -781,7 +771,6 @@ class AssetAgent:
         return None
     
     def fetch_all(self, script: VideoScript) -> Dict:
-        """Fetch all assets for a script."""
         assets = {"videos": [], "images": [], "music": "", "sfx": {}, "thumb_bg": ""}
         
         for i, seg in enumerate(script.segments):
@@ -802,7 +791,6 @@ class AssetAgent:
         assets["sfx"]["pop"] = self.fetch_sfx("pop") or ""
         assets["sfx"]["bass_drop"] = self.fetch_sfx("bass_drop") or ""
         
-        # Thumbnail background
         thumb_prompt = f"youtube thumbnail, {script.category}, shocked face, neon background, cinematic"
         assets["thumb_bg"] = self.fetch_image(thumb_prompt, 99) or ""
         
@@ -834,17 +822,9 @@ class ThumbnailAgent:
                 draw.line([(0, y), (self.w, y)], fill=(r, g, b))
         
         draw = ImageDraw.Draw(img)
-        
-        # Shock badge
         self._add_shock_badge(draw)
-        
-        # Title
         self._add_title(draw, script)
-        
-        # Branding
         self._add_branding(draw)
-        
-        # Curiosity elements
         self._add_curiosity(draw)
         
         path = str(Config.OUTPUT_DIR / "thumbnail.jpg")
@@ -891,14 +871,12 @@ class ThumbnailAgent:
         y = 250
         for i, line in enumerate(lines[:3]):
             font = font_large if i == 0 else font_medium
-            # Outline
             for offset in range(10, 0, -2):
                 color = (255, 20, 100) if offset > 6 else (0, 255, 255) if offset > 3 else (0, 0, 0)
                 for dx in [-offset, 0, offset]:
                     for dy in [-offset, 0, offset]:
                         if dx != 0 or dy != 0:
                             draw.text((640 + dx, y + dy), line, font=font, fill=color, anchor="mm")
-            # Main text
             draw.text((640, y), line, font=font, fill=(255, 255, 255), anchor="mm")
             y += 100
     
@@ -907,14 +885,12 @@ class ThumbnailAgent:
         draw.text((640, 680), "@AjeebologyShorts", font=font, fill=Config.ACCENT, anchor="mm")
     
     def _add_curiosity(self, draw: ImageDraw.Draw):
-        # Red circle
         draw.ellipse([1100, 550, 1200, 650], outline=(255, 0, 0), width=5)
         draw.ellipse([1110, 560, 1190, 640], outline=(255, 50, 50), width=3)
-        # Arrow
         draw.line([(100, 600), (200, 550), (200, 570), (300, 570)], fill=(255, 220, 0), width=8)
 
 # =============================================================================
-# 7. VIDEO RENDERING (MoviePy + FFmpeg Hybrid)
+# 7. VIDEO RENDERING
 # =============================================================================
 
 class VideoEngine:
@@ -934,20 +910,16 @@ class VideoEngine:
         return self._render_ffmpeg(script, audio_segments, assets, final_audio, output)
     
     def _render_moviepy(self, script, audio_segments, assets, final_audio, output):
-        """Professional rendering with MoviePy."""
         clips = []
         total_dur = sum(seg.duration for seg in audio_segments) + 1
         
-        # Background
         bg = ColorClip(size=(self.w, self.h), color=Config.BG_DARK).set_duration(total_dur)
         clips.append(bg)
         
-        # Add B-roll for each segment
         for i, seg in enumerate(audio_segments):
-            seg_dur = seg.duration + 0.5  # Text stays 0.5s longer
+            seg_dur = seg.duration + 0.5
             seg_start = seg.start
             
-            # Try video, then image
             vid_path = assets["videos"][i] if i < len(assets["videos"]) else None
             img_path = assets["images"][i] if i < len(assets["images"]) else None
             
@@ -968,7 +940,6 @@ class VideoEngine:
                 except:
                     pass
             
-            # Text overlay
             text = seg.segment.text
             if text:
                 txt = TextClip(
@@ -981,7 +952,6 @@ class VideoEngine:
                 txt = fadein(txt, 0.3).fadeout(0.3)
                 clips.append(txt)
             
-            # Emphasis highlight
             if seg.segment.emphasis:
                 emph_text = " ".join(seg.segment.emphasis[:2])
                 emph = TextClip(
@@ -992,31 +962,24 @@ class VideoEngine:
                 emph = emph.set_position(('center', self.h // 2 + 150))
                 clips.append(emph)
         
-        # Progress bar (simple line at bottom)
-        # Subscribe CTA at end
         cta_start = total_dur - 5
         cta = TextClip(
-            "SUBSCRIBE KARO! 🔥", fontsize=70, color='white',
+            "SUBSCRIBE KARO! FIRE", fontsize=70, color='white',
             font='DejaVu-Sans-Bold', stroke_color='#FF1464', stroke_width=4
         )
         cta = cta.set_duration(5).set_start(cta_start)
         cta = cta.set_position(('center', self.h - 200))
         clips.append(cta)
         
-        # Composite
         final = CompositeVideoClip(clips, size=(self.w, self.h))
-        
-        # Audio
         audio = AudioFileClip(final_audio)
         final = final.set_audio(audio)
         
-        # Write
         final.write_videofile(
             output, fps=self.fps, codec='libx264', audio_codec='aac',
             bitrate='6000k', audio_bitrate='192k', preset='fast', threads=4
         )
         
-        # Cleanup
         final.close()
         for c in clips:
             try:
@@ -1027,24 +990,17 @@ class VideoEngine:
         return output
     
     def _render_ffmpeg(self, script, audio_segments, assets, final_audio, output):
-        """Fallback FFmpeg rendering (no MoviePy)."""
-        # Create a simple slideshow with Ken Burns effect
-        # This is a simplified fallback - generates video from images
-        
         total_dur = sum(seg.duration for seg in audio_segments) + 1
         
-        # Build input list for ffmpeg
         inputs = []
         filters = []
-        stream_idx = 1  # 0 is audio
+        stream_idx = 1
         
         for i, seg in enumerate(audio_segments):
             img_path = assets["images"][i] if i < len(assets["images"]) else None
             
             if img_path and os.path.exists(img_path):
                 inputs.extend(["-loop", "1", "-t", str(seg.duration + 0.5), "-i", img_path])
-                
-                # Ken Burns + overlay
                 filters.append(
                     f"[{stream_idx}:v]scale={self.w}:{self.h}:force_original_aspect_ratio=decrease,"
                     f"pad={self.w}:{self.h}:(ow-iw)/2:(oh-ih)/2,"
@@ -1055,7 +1011,6 @@ class VideoEngine:
                 stream_idx += 1
         
         if stream_idx > 1:
-            # Concatenate all video segments
             concat = "".join([f"[v{i}]" for i in range(stream_idx - 1)]) + f"concat=n={stream_idx - 1}:v=1:a=0[outv]"
             filters.append(concat)
             filter_str = "".join(filters)
@@ -1073,7 +1028,6 @@ class VideoEngine:
             if rc == 0 and os.path.exists(output):
                 return output
         
-        # Ultimate fallback: black video with audio
         log.warning("Using ultimate fallback: black video")
         run_cmd([
             "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s={self.w}x{self.h}:d={total_dur}",
@@ -1134,19 +1088,19 @@ class TelegramAgent:
         repo = meta.get("repo", "")
         artifact = f"https://github.com/{repo}/actions/runs/{run_id}" if repo and run_id else ""
         
-        return f"""<b>🎬 {script.seo_title}</b>
+        return f"""<b>VIDEO: {script.seo_title}</b>
 
-<b>📋 Title:</b> {script.title}
-<b>📁 Category:</b> {script.category}
-<b>🔥 Trending:</b> {script.trending or "N/A"}
+<b>Title:</b> {script.title}
+<b>Category:</b> {script.category}
+<b>Trending:</b> {script.trending or "N/A"}
 
-<b>📝 Description:</b>
+<b>Description:</b>
 {script.description}
 
-<b>🏷 Tags:</b> {tags}
-<b>#️⃣ Hashtags:</b> {hashtags}
+<b>Tags:</b> {tags}
+<b>Hashtags:</b> {hashtags}
 
-<b>📥 Download:</b> {artifact or "Check GitHub Actions artifacts"}
+<b>Download:</b> {artifact or "Check GitHub Actions artifacts"}
 
 #AjeebologyShorts #YouTubeShorts #DailyFacts"""
     
@@ -1166,7 +1120,6 @@ class TelegramAgent:
 
 class MetadataAgent:
     def export(self, script: VideoScript, video_path: str, thumb_path: str, index: int):
-        """Export metadata for easy YouTube upload."""
         meta = {
             "title": script.seo_title,
             "description": f"{script.description}\n\n{' '.join(script.hashtags)}",
@@ -1177,20 +1130,18 @@ class MetadataAgent:
             "made_for_kids": False
         }
         
-        # Save as JSON
         meta_path = Config.OUTPUT_DIR / f"metadata_{index}.json"
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
         
-        # Save as text (easy copy-paste)
         text_path = Config.OUTPUT_DIR / f"upload_info_{index}.txt"
         with open(text_path, "w") as f:
-            f.write(f"TITLE:\\n{meta['title']}\\n\\n")
-            f.write(f"DESCRIPTION:\\n{meta['description']}\\n\\n")
-            f.write(f"TAGS:\\n{', '.join(meta['tags'])}\\n\\n")
-            f.write(f"CATEGORY: {meta['category']}\\n")
-            f.write(f"VIDEO: {video_path}\\n")
-            f.write(f"THUMBNAIL: {thumb_path}\\n")
+            f.write(f"TITLE:\n{meta['title']}\n\n")
+            f.write(f"DESCRIPTION:\n{meta['description']}\n\n")
+            f.write(f"TAGS:\n{', '.join(meta['tags'])}\n\n")
+            f.write(f"CATEGORY: {meta['category']}\n")
+            f.write(f"VIDEO: {video_path}\n")
+            f.write(f"THUMBNAIL: {thumb_path}\n")
         
         log.success(f"Metadata exported for video {index}")
         return str(meta_path), str(text_path)
@@ -1212,50 +1163,40 @@ class AjeebologyPipeline:
         self.metadata = MetadataAgent()
     
     def run_single(self, category: str = None, index: int = 0) -> bool:
-        """Generate a single video."""
         log.info(f"=== Generating Video {index + 1} ===")
         
         try:
-            # 1. Research
             log.info("Researching trending facts...")
             research = self.research.fetch(category)
             log.info(f"Category: {research['category']}, Topic: {research['title'][:50]}")
             
-            # 2. Script
             log.info("Generating viral script...")
             script = self.script.generate(research)
             log.info(f"Title: {script.title}")
             for seg in script.segments:
                 log.info(f"  [{seg.seg_type}] {seg.text[:50]}...")
             
-            # 3. Voice
             log.info("Generating voiceover...")
             audio_segments = self.voice.generate(script)
             total_voice = sum(s.duration for s in audio_segments)
             log.info(f"Voice duration: {total_voice:.2f}s")
             
-            # 4. Assets
             log.info("Fetching B-roll and music...")
             assets = self.assets.fetch_all(script)
             
-            # 5. Mix audio
             log.info("Mixing audio...")
             final_audio = self.voice.mix(audio_segments, assets.get("music"))
             
-            # 6. Render video
             log.info("Rendering professional video...")
             video_path = self.video.render(script, audio_segments, assets, final_audio)
             log.success(f"Video rendered: {video_path}")
             
-            # 7. Thumbnail
             log.info("Generating thumbnail...")
             thumb_path = self.thumbnail.generate(script, assets.get("thumb_bg"))
             log.success(f"Thumbnail: {thumb_path}")
             
-            # 8. Metadata
             meta_path, text_path = self.metadata.export(script, video_path, thumb_path, index)
             
-            # 9. Telegram
             meta = {
                 "run_id": os.environ.get("GITHUB_RUN_ID", ""),
                 "repo": os.environ.get("GITHUB_REPOSITORY", "")
@@ -1271,14 +1212,12 @@ class AjeebologyPipeline:
             return False
     
     def run(self):
-        """Run full pipeline."""
-        print("╔══════════════════════════════════════════════════════╗")
-        print("║  AJEEBOLOGY SHORTS v3.0 - PROFESSIONAL PIPELINE      ║")
-        print("║  Zero Budget | Fully Automated | Monetization Ready ║")
-        print("╚══════════════════════════════════════════════════════╝")
+        print("=" * 60)
+        print("AJEEBOLOGY SHORTS v3.0 - PROFESSIONAL PIPELINE")
+        print("Zero Budget | Fully Automated | Monetization Ready")
+        print("=" * 60)
         print()
         
-        # Validate secrets
         if not Config.GROQ_API_KEY or not Config.TAVILY_API_KEY:
             log.error("Missing required API keys!")
             return False
@@ -1293,17 +1232,15 @@ class AjeebologyPipeline:
             cat = category_override if category_override else None
             if self.run_single(cat, i):
                 success_count += 1
-            time.sleep(2)  # Brief pause between videos
+            time.sleep(2)
         
-        # Summary
         print()
         print("=" * 60)
         print(f"PIPELINE COMPLETE: {success_count}/{videos_to_make} videos generated")
         print("=" * 60)
         
-        # List outputs
         if Config.OUTPUT_DIR.exists():
-            print("\n📁 Output files:")
+            print("\nOutput files:")
             for f in sorted(Config.OUTPUT_DIR.iterdir()):
                 size = f.stat().st_size / 1024 / 1024
                 print(f"   {f.name} ({size:.1f} MB)")
