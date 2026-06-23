@@ -2,7 +2,6 @@ name: Ajeebology Shorts - Professional Automation v3
 
 on:
   schedule:
-    # Runs at 9:00 AM PST daily (16:00 UTC)
     - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
@@ -26,13 +25,11 @@ jobs:
     timeout-minutes: 50
     
     steps:
-    # ========== STEP 1: Checkout ==========
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
     
-    # ========== STEP 2: Validate Secrets ==========
     - name: Validate required secrets
       run: |
         MISSING=""
@@ -47,14 +44,11 @@ jobs:
         fi
         echo "✅ All required secrets present"
     
-    # ========== STEP 3: Setup Python ==========
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: 'pip'
     
-    # ========== STEP 4: Install System Dependencies ==========
     - name: Install system dependencies
       run: |
         sudo apt-get update -qq
@@ -74,24 +68,14 @@ jobs:
         ffmpeg -version | head -1
         convert --version | head -1
     
-    # ========== STEP 5: Install Python Dependencies ==========
     - name: Install Python dependencies
       run: |
         pip install --upgrade pip
-        pip install \
-          requests \
-          Pillow \
-          numpy \
-          edge-tts \
-          pydub \
-          moviepy \
-          imageio[ffmpeg] \
-          python-dotenv
+        pip install requests Pillow numpy edge-tts pydub moviepy imageio[ffmpeg]
         python -c "import PIL; print('Pillow:', PIL.__version__)"
         python -c "import numpy; print('NumPy:', numpy.__version__)"
         python -c "import moviepy; print('MoviePy:', moviepy.__version__)"
     
-    # ========== STEP 6: Cache Assets ==========
     - name: Cache downloaded assets
       uses: actions/cache@v4
       with:
@@ -100,7 +84,6 @@ jobs:
         restore-keys: |
           ajeebology-assets-
     
-    # ========== STEP 7: Run Pipeline ==========
     - name: Run Ajeebology Pipeline
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -128,7 +111,6 @@ jobs:
         
         python youtube_agent.py
         
-        # Copy outputs
         for f in /tmp/ajeebology/output/*; do
           if [ -f "$f" ]; then
             cp "$f" output/
@@ -138,7 +120,6 @@ jobs:
         
         ls -lh output/
     
-    # ========== STEP 8: Upload Artifacts ==========
     - name: Upload video artifacts
       uses: actions/upload-artifact@v4
       if: always()
@@ -152,7 +133,6 @@ jobs:
         retention-days: 7
         if-no-files-found: warn
     
-    # ========== STEP 9: Cleanup ==========
     - name: Cleanup temporary files
       if: always()
       run: |
@@ -162,7 +142,6 @@ jobs:
         du -sh /tmp/ajeebology/ 2>/dev/null || true
         df -h
     
-    # ========== STEP 10: Failure Notification ==========
     - name: Notify on failure
       if: failure()
       env:
