@@ -1,36 +1,60 @@
-name: Ajeebology Shorts - Daily Automation
+name: Ajeebology Shorts - Professional Automation v3
 
 on:
   schedule:
-    # Runs at 9:00 AM PST daily (16:00 UTC, adjusts for DST automatically)
+    # Runs at 9:00 AM PST daily (16:00 UTC)
     - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
       category:
-        description: 'Force a specific category (psychology/space/weird_facts)'
+        description: 'Force specific category (psychology/space/weird_facts/dark_psychology/money_hacks)'
         required: false
         default: ''
+      videos_count:
+        description: 'Number of videos to generate (1-5)'
+        required: false
+        default: '3'
 
 env:
   PYTHONUNBUFFERED: "1"
   FORCE_COLOR: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
   build-and-deliver:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     
     steps:
+    # ========== STEP 1: Checkout ==========
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
     
+    # ========== STEP 2: Validate Secrets ==========
+    - name: Validate required secrets
+      run: |
+        MISSING=""
+        [ -z "${{ secrets.GROQ_API_KEY }}" ] && MISSING="$MISSING GROQ_API_KEY"
+        [ -z "${{ secrets.TAVILY_API_KEY }}" ] && MISSING="$MISSING TAVILY_API_KEY"
+        [ -z "${{ secrets.TELEGRAM_TOKEN }}" ] && MISSING="$MISSING TELEGRAM_TOKEN"
+        [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ] && MISSING="$MISSING TELEGRAM_CHAT_ID"
+        
+        if [ -n "$MISSING" ]; then
+          echo "❌ MISSING SECRETS:$MISSING"
+          exit 1
+        fi
+        echo "✅ All required secrets present"
+    
+    # ========== STEP 3: Setup Python ==========
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        cache: 'pip'
     
+    # ========== STEP 4: Install System Dependencies ==========
     - name: Install system dependencies
       run: |
         sudo apt-get update -qq
@@ -44,9 +68,13 @@ jobs:
           fonts-dejavu-core \
           fonts-liberation \
           fonts-freefont-ttf \
-          fonts-noto-core
+          fonts-noto-core \
+          imagemagick \
+          libmagickwand-dev
         ffmpeg -version | head -1
+        convert --version | head -1
     
+    # ========== STEP 5: Install Python Dependencies ==========
     - name: Install Python dependencies
       run: |
         pip install --upgrade pip
@@ -55,78 +83,95 @@ jobs:
           Pillow \
           numpy \
           edge-tts \
-          openai-whisper \
-          pydub
+          pydub \
+          moviepy \
+          imageio[ffmpeg] \
+          python-dotenv
         python -c "import PIL; print('Pillow:', PIL.__version__)"
         python -c "import numpy; print('NumPy:', numpy.__version__)"
+        python -c "import moviepy; print('MoviePy:', moviepy.__version__)"
     
+    # ========== STEP 6: Cache Assets ==========
     - name: Cache downloaded assets
       uses: actions/cache@v4
       with:
-        path: /tmp/ajeebology/assets
+        path: /tmp/ajeebology/cache
         key: ajeebology-assets-${{ github.run_id }}
         restore-keys: |
           ajeebology-assets-
     
+    # ========== STEP 7: Run Pipeline ==========
     - name: Run Ajeebology Pipeline
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         CATEGORY_OVERRIDE: ${{ github.event.inputs.category }}
+        VIDEOS_COUNT: ${{ github.event.inputs.videos_count }}
       run: |
-        echo "Starting Ajeebology Shorts Pipeline..."
-        echo "Run ID: $GITHUB_RUN_ID"
-        echo "Repository: $GITHUB_REPOSITORY"
+        echo "╔══════════════════════════════════════════════════════╗"
+        echo "║  AJEEBOLOGY SHORTS v3.0 - PROFESSIONAL PIPELINE      ║"
+        echo "╚══════════════════════════════════════════════════════╝"
+        echo ""
+        echo "📅 Date: $(date)"
+        echo "🆔 Run ID: $GITHUB_RUN_ID"
+        echo "📦 Repo: $GITHUB_REPOSITORY"
+        echo "🎬 Videos: ${VIDEOS_COUNT:-3}"
+        echo ""
         
         mkdir -p output
         
         python youtube_agent.py
         
-        if [ -f /tmp/ajeebology/output/output_video.mp4 ]; then
-          cp /tmp/ajeebology/output/output_video.mp4 output/
-          echo "Video copied to output/"
-        fi
-        
-        if [ -f /tmp/ajeebology/output/thumbnail.jpg ]; then
-          cp /tmp/ajeebology/output/thumbnail.jpg output/
-          echo "Thumbnail copied to output/"
-        fi
+        # Copy outputs
+        for f in /tmp/ajeebology/output/*; do
+          if [ -f "$f" ]; then
+            cp "$f" output/
+            echo "📁 Copied: $(basename $f)"
+          fi
+        done
         
         ls -lh output/
     
-    - name: Upload video artifact
+    # ========== STEP 8: Upload Artifacts ==========
+    - name: Upload video artifacts
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: ajeebology-video-${{ github.run_id }}
+        name: ajeebology-videos-${{ github.run_id }}
         path: |
-          output/output_video.mp4
-          output/thumbnail.jpg
+          output/*.mp4
+          output/*.jpg
+          output/*.txt
+          output/*.json
         retention-days: 7
         if-no-files-found: warn
     
+    # ========== STEP 9: Cleanup ==========
     - name: Cleanup temporary files
       if: always()
       run: |
-        echo "Cleaning up temporary files..."
+        echo "🧹 Cleaning up..."
         rm -rf /tmp/ajeebology/frames
+        rm -rf /tmp/ajeebology/audio
         du -sh /tmp/ajeebology/ 2>/dev/null || true
         df -h
     
+    # ========== STEP 10: Failure Notification ==========
     - name: Notify on failure
       if: failure()
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        echo "Pipeline failed. Sending notification..."
         curl -s -X POST \
           "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
           -d "chat_id=${TELEGRAM_CHAT_ID}" \
           -d "parse_mode=HTML" \
-          -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0ARepository: ${{ github.repository }}%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>" \
+          -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0A⏱ Duration exceeded or error occurred%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>" \
           || true
