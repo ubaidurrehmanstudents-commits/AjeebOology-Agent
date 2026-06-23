@@ -152,6 +152,13 @@ def get_audio_duration(path: str) -> float:
         return 0.0
 
 
+def get_video_file_size(path: str) -> float:
+    try:
+        return Path(path).stat().st_size / (1024 * 1024)
+    except:
+        return 0.0
+
+
 def download_file(url: str, path: str, timeout: int = 30) -> bool:
     if not url:
         return False
@@ -1125,7 +1132,7 @@ class VideoEngine:
 
 
 # =============================================================================
-# TELEGRAM AGENT
+# TELEGRAM AGENT - COMPLETE REWRITE WITH RICH MESSAGES
 # =============================================================================
 
 class TelegramAgent:
@@ -1133,18 +1140,126 @@ class TelegramAgent:
         self.token = token
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{token}"
+        self.github_repo = os.getenv("GITHUB_REPOSITORY", "")
+        self.github_run_id = os.getenv("GITHUB_RUN_ID", "")
+        self.github_server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+
+    def _get_artifact_link(self) -> str:
+        """Generate link to GitHub Actions artifacts page."""
+        if self.github_repo and self.github_run_id:
+            return f"{self.github_server}/{self.github_repo}/actions/runs/{self.github_run_id}"
+        return "GitHub Actions artifacts (check repository)"
+
+    def _get_engagement_tips(self, category: str) -> str:
+        """Return category-specific engagement tips."""
+        tips = {
+            "psychology": (
+                "Post between 6-9 PM PKT for maximum engagement. "
+                "Psychology content performs best on weekdays. "
+                "Ask viewers 'Which fact shocked you most?' in first comment."
+            ),
+            "space": (
+                "Post between 8-10 PM PKT. Space content trends on weekends. "
+                "Pin a comment asking 'Do you believe in aliens?' for higher CTR."
+            ),
+            "weird facts": (
+                "Post between 5-8 PM PKT. Weird facts go viral on Fridays. "
+                "Use 'Bet you didn't know #3' in your community post to drive traffic."
+            )
+        }
+        return tips.get(category, tips["psychology"])
+
+    def _get_best_hashtags(self, category: str) -> str:
+        """Return trending hashtags for the category."""
+        hashtags = {
+            "psychology": "#PsychologyFacts #MindBlowing #BrainHacks #Shorts",
+            "space": "#SpaceFacts #NASA #Universe #AstronomyShorts",
+            "weird facts": "#WeirdFacts #DidYouKnow #AmazingFacts #ViralShorts"
+        }
+        return hashtags.get(category, "#Shorts #Viral #Facts")
+
+    def _get_upload_reminder(self) -> str:
+        """Return scheduled upload reminder."""
+        return (
+            "Upload Reminder: Schedule this video for 5:00 PM PKT today. "
+            "This is peak engagement time for your audience."
+        )
+
+    def _build_rich_caption(self, metadata: Dict, video_path: str) -> str:
+        """Build the complete rich message with all requested fields."""
+        category = metadata.get("category", "facts")
+        duration = metadata.get("duration", 0)
+        file_size = get_video_file_size(video_path)
+        artifact_link = self._get_artifact_link()
+        engagement_tips = self._get_engagement_tips(category)
+        trending_hashtags = self._get_best_hashtags(category)
+        upload_reminder = self._get_upload_reminder()
+
+        lines = [
+            f"<b>🎬 VIDEO READY FOR UPLOAD</b>",
+            f"",
+            f"<b>📌 TITLE:</b>",
+            f"<code>{metadata['title']}</code>",
+            f"",
+            f"<b>📂 CATEGORY:</b> {category.title()}",
+            f"",
+            f"<b>📝 DESCRIPTION:</b>",
+            f"{metadata['description']}",
+            f"",
+            f"<b>🏷️ TAGS:</b>",
+            f"<code>{', '.join(metadata.get('tags', []))}</code>",
+            f"",
+            f"<b>#️⃣ HASHTAGS:</b>",
+            f"<code>{' '.join(metadata.get('hashtags', []))}</code>",
+            f"",
+            f"<b>🔥 TRENDING HASHTAGS:</b>",
+            f"<code>{trending_hashtags}</code>",
+            f"",
+            f"<b>📊 VIDEO DETAILS:</b>",
+            f"Duration: {duration:.1f}s | File Size: {file_size:.1f}MB",
+            f"Resolution: 1080x1920 (Vertical) | Format: MP4",
+            f"",
+            f"<b>⬇️ DOWNLOAD VIDEO:</b>",
+            f"<a href='{artifact_link}'>Click here to download from GitHub Artifacts</a>",
+            f"",
+            f"<b>💡 ENGAGEMENT TIPS:</b>",
+            f"{engagement_tips}",
+            f"",
+            f"<b>⏰ {upload_reminder}</b>",
+            f"",
+            f"<b>📋 COPY-PASTE YOUTUBE DESCRIPTION:</b>",
+            f"<pre>{metadata['description']}</pre>",
+            f"",
+            f"<pre>{' '.join(metadata.get('hashtags', []))} {trending_hashtags}</pre>",
+            f"",
+            f"<b>✅ UPLOAD CHECKLIST:</b>",
+            f"□ Add custom thumbnail (thumbnail.jpg attached)",
+            f"□ Set 'Made for Kids' to No",
+            f"□ Add end screen (last 5-20s)",
+            f"□ Pin first comment with CTA",
+            f"□ Share to community tab",
+            f"□ Add to playlist 'Daily Shorts'",
+            f"",
+            f"<i>Generated by AjeebOology Agent 🤖</i>"
+        ]
+        return "\n".join(lines)
 
     def send_video(self, video_path: str, thumb_path: str, metadata: Dict) -> bool:
+        """Send video with thumbnail preview and rich caption."""
         try:
-            size_mb = Path(video_path).stat().st_size / (1024 * 1024)
+            size_mb = get_video_file_size(video_path)
+            caption = self._build_rich_caption(metadata, video_path)
+
             if size_mb > 48:
-                return self._send_link(metadata, size_mb)
+                print(f"Video too large ({size_mb:.1f}MB), sending as document")
+                return self._send_as_document(video_path, thumb_path, caption)
 
             with open(video_path, "rb") as v, open(thumb_path, "rb") as t:
                 payload = {
                     "chat_id": self.chat_id,
-                    "caption": self._build_caption(metadata),
-                    "parse_mode": "HTML"
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                    "supports_streaming": "true"
                 }
                 files = {
                     "video": v,
@@ -1157,67 +1272,105 @@ class TelegramAgent:
                     timeout=120
                 )
                 r.raise_for_status()
+                print("Video sent successfully to Telegram")
                 return True
         except Exception as e:
-            print(f"Telegram send error: {e}")
-            return self._send_link(metadata, 0)
+            print(f"Telegram video send error: {e}")
+            return self._send_as_document(video_path, thumb_path, caption)
 
-    def _send_link(self, metadata: Dict, size_mb: float):
+    def _send_as_document(self, video_path: str, thumb_path: str, caption: str) -> bool:
+        """Send video as document file if too large for video message."""
         try:
-            text = self._build_caption(metadata)
-            if size_mb > 0:
-                text += (
-                    f"\n\n<i>Video too large ({size_mb:.1f}MB). "
-                    f"Download from GitHub Actions artifacts.</i>"
+            with open(video_path, "rb") as v:
+                payload = {
+                    "chat_id": self.chat_id,
+                    "caption": caption,
+                    "parse_mode": "HTML"
+                }
+                files = {
+                    "document": v
+                }
+                r = requests.post(
+                    f"{self.base_url}/sendDocument",
+                    data=payload,
+                    files=files,
+                    timeout=120
                 )
+                r.raise_for_status()
+
+            self._send_thumbnail_preview(thumb_path)
+            return True
+        except Exception as e:
+            print(f"Telegram document send error: {e}")
+            return self._send_fallback_message(caption)
+
+    def _send_thumbnail_preview(self, thumb_path: str):
+        """Send thumbnail as separate photo for preview."""
+        try:
+            with open(thumb_path, "rb") as t:
+                payload = {
+                    "chat_id": self.chat_id,
+                    "caption": "<b>🖼️ Thumbnail Preview</b>",
+                    "parse_mode": "HTML"
+                }
+                files = {
+                    "photo": t
+                }
+                requests.post(
+                    f"{self.base_url}/sendPhoto",
+                    data=payload,
+                    files=files,
+                    timeout=30
+                )
+        except Exception as e:
+            print(f"Thumbnail preview send error: {e}")
+
+    def _send_fallback_message(self, caption: str) -> bool:
+        """Send text-only message with artifact link if all else fails."""
+        try:
             r = requests.post(
                 f"{self.base_url}/sendMessage",
                 data={
                     "chat_id": self.chat_id,
-                    "text": text,
-                    "parse_mode": "HTML"
+                    "text": caption,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": False
                 },
                 timeout=30
             )
             return r.status_code == 200
         except Exception as e:
-            print(f"Telegram link send error: {e}")
+            print(f"Telegram fallback send error: {e}")
             return False
 
     def send_failure(self, error_msg: str):
+        """Send detailed failure notification with debugging info."""
         try:
+            artifact_link = self._get_artifact_link()
             text = (
-                f"<b>❌ YouTube Agent Failed</b>\n\n"
-                f"{error_msg}\n\n"
-                f"Check GitHub Actions logs."
+                f"<b>❌ YOUTUBE AGENT FAILED</b>\n\n"
+                f"<b>Error:</b> <code>{error_msg[:500]}</code>\n\n"
+                f"<b>Debug Info:</b>\n"
+                f"Repository: {self.github_repo}\n"
+                f"Run ID: {self.github_run_id}\n\n"
+                f"<b>Check logs:</b> <a href='{artifact_link}'>GitHub Actions Run</a>\n\n"
+                f"<i>Common fixes:</i>\n"
+                f"1. Check API keys are set in secrets\n"
+                f"2. Verify Telegram bot token\n"
+                f"3. Check Groq/Tavily API status"
             )
             requests.post(
                 f"{self.base_url}/sendMessage",
                 data={
                     "chat_id": self.chat_id,
                     "text": text,
-                    "parse_mode": "HTML"
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": False
                 },
                 timeout=30
             )
         except Exception as e:
             print(f"Telegram failure notify error: {e}")
-
-    def _build_caption(self, metadata: Dict) -> str:
-        lines = [
-            f"<b>{metadata['title']}</b>",
-            "",
-            f"<b>Description:</b> {metadata['description']}",
-            "",
-            f"<b>Tags:</b> {', '.join(metadata.get('tags', []))}",
-            "",
-            f"<b>Hashtags:</b> {' '.join(metadata.get('hashtags', []))}",
-            "",
-            f"<b>Duration:</b> {metadata.get('duration', 0):.1f}s",
-            "",
-            "Download artifacts from GitHub Actions."
-        ]
-        return "\n".join(lines)
 
 
 # =============================================================================
