@@ -1,79 +1,117 @@
-name: 🎬 Ajeebology Shorts Pipeline
+name: Ajeebology Shorts Generator
 
 on:
+  schedule:
+    # Run daily at 06:00 UTC (adjust as needed)
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       topic:
-        description: 'Topic category'
+        description: 'Topic override (psychology, space, weird_world)'
         required: false
-        default: 'random'
-        type: choice
-        options:
-          - random
-          - psychology
-          - space
-          - weird_world
-      count:
-        description: 'Videos to generate'
+        default: ''
+      custom_prompt:
+        description: 'Custom prompt for video content'
         required: false
-        default: '1'
-        type: choice
-        options:
-          - '1'
-          - '2'
-          - '3'
-
-  schedule:
-    # Runs daily at 10:30 AM Pakistan Standard Time (UTC+5)
-    - cron: '30 5 * * *'
+        default: ''
 
 env:
-  PYTHON_VERSION: '3.11'
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
 
 jobs:
-  produce:
-    name: Generate Shorts
+  generate-short:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-
+    permissions:
+      contents: read
+      actions: write
+    
     steps:
-      - name: 📥 Checkout repository
+      # ─────────────────────────────────────────────
+      # CHECKOUT
+      # ─────────────────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: ⚡ Setup Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          # Use youtube_agent.py as cache key since no requirements.txt allowed
-          cache-dependency-path: youtube_agent.py
-
-      - name: 📦 Install system dependencies
+      # ─────────────────────────────────────────────
+      # SYSTEM DEPENDENCIES
+      # ─────────────────────────────────────────────
+      - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             ffmpeg \
-            imagemagick \
-            fonts-noto \
             fonts-noto-color-emoji \
-            fonts-indic
-          mkdir -p output
-          echo "✅ System deps installed"
+            fonts-noto-cjk \
+            fonts-humor-sans \
+            libass-dev \
+            libfreetype6-dev \
+            libharfbuzz-dev \
+            imagemagick \
+            webp \
+            libwebp-dev
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
 
-      - name: 📦 Install Python dependencies
+      # ─────────────────────────────────────────────
+      # PYTHON SETUP & CACHE
+      # ─────────────────────────────────────────────
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        id: pip-cache
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt', '**/pyproject.toml', '**/setup.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          pip install --upgrade pip setuptools wheel
           pip install \
-            groq==1.5.0 \
-            tavily-python==0.7.26 \
-            pillow==10.4.0 \
-            numpy==1.26.4 \
-            requests==2.32.3 \
-            edge-tts==7.2.8 \
-            mutagen==1.47.0
-          echo "✅ Python deps installed"
+            requests \
+            pillow \
+            edge-tts \
+            python-telegram-bot==20.7 \
+            aiohttp \
+            aiofiles \
+            pydub \
+            numpy \
+            python-dotenv \
+            groq \
+            tavily-python \
+            pexels-api-py \
+            unsplash-search \
+            fonttools \
+            imageio[ffmpeg] \
+            imageio \
+            tqdm
+          # Verify critical imports
+          python -c "import PIL; import edge_tts; import telegram; import groq; import tavily; print('All imports OK')"
 
-      - name: 🎬 Run Shorts Pipeline
+      # ─────────────────────────────────────────────
+      # CACHE ASSETS (Optional optimization)
+      # ─────────────────────────────────────────────
+      - name: Cache downloaded assets
+        uses: actions/cache@v4
+        id: assets-cache
+        with:
+          path: ./assets_cache
+          key: assets-${{ github.run_id }}
+          restore-keys: assets-
+
+      # ─────────────────────────────────────────────
+      # RUN GENERATOR
+      # ─────────────────────────────────────────────
+      - name: Generate YouTube Short
+        id: generate
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
@@ -81,18 +119,134 @@ jobs:
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TOPIC: ${{ github.event.inputs.topic || 'random' }}
-          VIDEO_COUNT: ${{ github.event.inputs.count || '1' }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python youtube_agent.py
+          TOPIC_OVERRIDE: ${{ github.event.inputs.topic }}
+          CUSTOM_PROMPT: ${{ github.event.inputs.custom_prompt }}
+        run: |
+          mkdir -p output assets_cache
+          python youtube_agent.py
+        continue-on-error: false
 
-      - name: 📤 Upload video artifacts
-        if: always()
+      # ─────────────────────────────────────────────
+      # UPLOAD ARTIFACTS (Video + Thumbnail + Metadata)
+      # ─────────────────────────────────────────────
+      - name: Upload video artifact
         uses: actions/upload-artifact@v4
+        if: success()
         with:
-          name: shorts-${{ github.run_id }}
-          path: output/
+          name: youtube-short-video
+          path: output/*.mp4
           retention-days: 7
           if-no-files-found: warn
-          compression-level: 0
+
+      - name: Upload thumbnail artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: youtube-short-thumbnail
+          path: output/*.jpg
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload metadata artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: youtube-short-metadata
+          path: output/metadata.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ─────────────────────────────────────────────
+      # TELEGRAM NOTIFICATION — SUCCESS
+      # ─────────────────────────────────────────────
+      - name: Notify Telegram — Success
+        if: success()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          VIDEO_FILE=$(ls -1 output/*.mp4 2>/dev/null | head -1)
+          THUMB_FILE=$(ls -1 output/*.jpg 2>/dev/null | head -1)
+          META_FILE="output/metadata.json"
+          
+          if [ -f "$META_FILE" ]; then
+            TITLE=$(python -c "import json; print(json.load(open('$META_FILE')).get('title','Ajeebology Short'))")
+            DESC=$(python -c "import json; print(json.load(open('$META_FILE')).get('description',''))")
+            TAGS=$(python -c "import json; print(', '.join(json.load(open('$META_FILE')).get('tags',[])))")
+            HASHTAGS=$(python -c "import json; print(' '.join(json.load(open('$META_FILE')).get('hashtags',[])))")
+            CATEGORY=$(python -c "import json; print(json.load(open('$META_FILE')).get('category','Education'))")
+            SOURCES=$(python -c "import json; d=json.load(open('$META_FILE')); print('\\n'.join([f'• {s}' for s in d.get('sources',[])]))")
+            STATS=$(python -c "import json; d=json.load(open('$META_FILE')); print(f\\\"Runtime: {d.get('runtime_stats',{}).get('total_seconds','N/A')}s | API Calls: {d.get('runtime_stats',{}).get('api_calls','N/A')} | Assets: {d.get('runtime_stats',{}).get('assets_downloaded','N/A')}\\\")")
+          else
+            TITLE="Ajeebology Short"
+            DESC="Generated automatically"
+            TAGS="shorts,facts"
+            HASHTAGS="#Shorts #Facts"
+            CATEGORY="Education"
+            SOURCES="N/A"
+            STATS="N/A"
+          fi
+          
+          CAPTION="🎬 <b>${TITLE}</b>
+          
+📝 <b>Description:</b>
+${DESC}
+
+🏷 <b>Tags:</b> ${TAGS}
+
+#️⃣ <b>Hashtags:</b> ${HASHTAGS}
+
+📂 <b>Category:</b> ${CATEGORY}
+
+📚 <b>Sources:</b>
+${SOURCES}
+
+📊 <b>Stats:</b> ${STATS}
+          
+⬇️ <b>Artifacts:</b> https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          # Send video with thumbnail as document
+          if [ -f "$VIDEO_FILE" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendVideo" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" \
+              -F "video=@${VIDEO_FILE}" \
+              -F "caption=${CAPTION}" \
+              -F "parse_mode=HTML" \
+              -F "supports_streaming=true" || true
+          fi
+          
+          # Send thumbnail separately
+          if [ -f "$THUMB_FILE" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendPhoto" \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" \
+              -F "photo=@${THUMB_FILE}" \
+              -F "caption=🖼 Thumbnail for: ${TITLE}" || true
+          fi
+
+      # ─────────────────────────────────────────────
+      # TELEGRAM NOTIFICATION — FAILURE
+      # ─────────────────────────────────────────────
+      - name: Notify Telegram — Failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          LOG_TAIL=$(tail -n 50 output/error.log 2>/dev/null || echo "No error log found")
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "parse_mode=HTML" \
+            -d "text=<b>❌ Ajeebology Shorts Generation Failed</b>
+          
+Run: <a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>
+
+<pre>${LOG_TAIL}</pre>" || true
+
+      # ─────────────────────────────────────────────
+      # CLEANUP (Free tier storage optimization)
+      # ─────────────────────────────────────────────
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          rm -rf output/*.tmp output/temp_* assets_cache/*.tmp
+          du -sh . 2>/dev/null || true
