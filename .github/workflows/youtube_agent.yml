@@ -1,65 +1,108 @@
-name: 🎬 Ajeebology Shorts — Daily Video Pipeline
+name: Ajeebology Shorts - Daily Production
+run-name: 🎬 Shorts Build ${{ github.run_number }}
 
 on:
   schedule:
-    - cron: '45 8 * * *'   # 1:45 PM PKT
+    # 08:00 PKT (UTC+5) = 03:00 UTC
+    - cron: '0 3 * * *'
   workflow_dispatch:
+    inputs:
+      topic:
+        description: 'Force topic (psychology|space|weird)'
+        required: false
+        default: ''
+      debug:
+        description: 'Verbose logging'
+        type: boolean
+        default: false
+
+concurrency:
+  group: youtube-shorts-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  GROQ_API_KEY:     ${{ secrets.GROQ_API_KEY }}
-  TAVILY_API_KEY:   ${{ secrets.TAVILY_API_KEY }}
-  PEXELS_API_KEY:   ${{ secrets.PEXELS_API_KEY }}
-  TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+  GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+  TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+  PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+  UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+  TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-  PYTHONUNBUFFERED: 1
+  PYTHONUNBUFFERED: '1'
+  FORCE_TOPIC: ${{ inputs.topic || '' }}
+  DEBUG: ${{ inputs.debug && '1' || '0' }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+
     steps:
-      - name: 📥 Checkout
+      - name: ⚡ Checkout
         uses: actions/checkout@v4
 
       - name: 🐍 Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: 🔧 Install system deps
+      - name: 📦 Cache pip packages
+        uses: actions/cache@v4
+        id: pip-cache
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('youtube_agent.py') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: 📦 Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core --no-install-recommends
+          sudo apt-get install -y -qq \
+            ffmpeg \
+            fonts-noto-core \
+            fonts-indic \
+            wget
+          ffmpeg -version | head -1
 
-      - name: 📦 Install Python deps
-        run: pip install edge-tts requests --quiet
-
-      - name: ✅ Verify
+      - name: 📦 Install Python dependencies
         run: |
-          python3 -c "import edge_tts; print('✓ edge-tts')"
-          python3 -c "import requests; print('✓ requests')"
-          ffmpeg -version > /dev/null 2>&1 && echo "✓ ffmpeg"
+          pip install --quiet --upgrade pip wheel setuptools
+          pip install --quiet \
+            edge-tts \
+            Pillow \
+            requests
 
-      - name: 🎬 Run pipeline
-        run: python3 youtube_agent.py
+      - name: 📦 Cache assets (media, audio)
+        uses: actions/cache@v4
+        id: asset-cache
+        with:
+          path: |
+            assets/
+          key: assets-${{ github.run_id }}
+          restore-keys: |
+            assets-
 
-      - name: 📤 Upload artifact
+      - name: 🏗️ Build Short
+        id: build
+        run: python youtube_agent.py 2>&1
+
+      - name: 📤 Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ajeebology-output
+          name: shorts-artifacts-${{ github.run_id }}
           path: |
-            /tmp/ajeebology_output/output_video.mp4
-            /tmp/ajeebology_output/metadata.json
-            /tmp/ajeebology_output/pipeline.log
-          if-no-files-found: warn
+            output/
+            !output/.*
           retention-days: 3
+          compression-level: 6
 
-      - name: ❌ Failure notification
-        if: failure()
+      - name: 🧹 Cleanup
+        if: always()
         run: |
-          MSG="❌ *Pipeline Failed* — Ajeebology Shorts%0A%0A🔍 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=$MSG" \
-            -d "parse_mode=Markdown" --max-time 10 || true
+          rm -rf tmp/ assets/ output/scene_*.mp4 output/voiceover.mp3 output/music.mp3
