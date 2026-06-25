@@ -23,7 +23,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: false   # Disable automatic pip caching to avoid file check
+          # No 'cache' line – this disables automatic caching
 
       - name: Install system dependencies
         run: |
