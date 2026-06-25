@@ -379,7 +379,7 @@ Rules:
 
     def generate_tts(self, script: str, output_dir: str) -> str:
         audio_path = os.path.join(output_dir, "voiceover.mp3")
-        self.groq.generate_speech(script, audio_path, voice="Arista-PlayAI")
+        self.groq.generate_speech(script, audio_path, voice="Arabella")
         duration = get_duration(audio_path)
         log(f"TTS duration: {duration:.1f}s")
         if duration < MIN_DURATION or duration > MAX_DURATION:
