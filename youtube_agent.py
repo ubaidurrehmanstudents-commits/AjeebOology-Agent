@@ -376,8 +376,7 @@ Rules:
         except Exception as e:
             log(f"Research failed: {e}", "WARN")
             return [ResearchSource(title=f"Wikipedia: {topic}", url=f"https://en.wikipedia.org/wiki/{topic.replace(' ', '_')}")]
-
-        def generate_tts(self, script: str, output_dir: str) -> str:
+    def generate_tts(self, script: str, output_dir: str) -> str:
         audio_path = os.path.join(output_dir, "voiceover.mp3")
         
         # Try Groq TTS first
@@ -404,6 +403,9 @@ Rules:
         except Exception as e:
             log(f"gTTS also failed: {e}", "ERROR")
             raise
+            
+            
+            
             
 
     def generate_title(self, topic: str, script: str) -> str:
