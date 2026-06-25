@@ -18,14 +18,12 @@ on:
         required: false
         default: false
         type: boolean
-
   schedule:
     - cron: '0 8 * * *'
     - cron: '0 20 * * *'
 
 env:
   PYTHONUNBUFFERED: "1"
-  FORCE_COLOR: "1"
   GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
   TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
   PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
@@ -54,31 +52,56 @@ jobs:
           cache: 'pip'
           cache-dependency-path: 'requirements.txt'
 
-      - name: Install system dependencies
+      - name: Install FFmpeg and system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg ffprobe fonts-noto-color-emoji fonts-noto-cjk fonts-dejavu-core imagemagick libmagickwand-dev sox libsox-fmt-mp3 curl jq 2>&1 | tail -n 5
+          sudo apt-get install -y -qq ffmpeg fonts-noto-color-emoji fonts-dejavu-core imagemagick sox libsox-fmt-mp3 curl jq
           ffmpeg -version | head -n 1
-          ffprobe -version | head -n 1
 
       - name: Install Python dependencies
         run: |
-          pip install --upgrade pip setuptools wheel -q
-          pip install -r requirements.txt -q 2>&1 | tail -n 3
+          pip install --upgrade pip -q
+          pip install -r requirements.txt -q
 
       - name: Pre-flight API checks
-        run: python youtube_agent.py --mode preflight
+        run: |
+          python -c "
+          import os, sys, requests
+          errors = []
+          try:
+              r = requests.get('https://api.groq.com/openai/v1/models', headers={'Authorization': 'Bearer ' + os.environ['GROQ_API_KEY']}, timeout=10)
+              if r.status_code != 200: errors.append('Groq: HTTP ' + str(r.status_code))
+          except Exception as e: errors.append('Groq: ' + str(e))
+          try:
+              r = requests.post('https://api.tavily.com/search', json={'api_key': os.environ['TAVILY_API_KEY'], 'query': 'test', 'max_results': 1}, timeout=10)
+              if r.status_code not in (200, 400, 422): errors.append('Tavily: HTTP ' + str(r.status_code))
+          except Exception as e: errors.append('Tavily: ' + str(e))
+          try:
+              r = requests.get('https://api.pexels.com/videos/search?query=test&per_page=1', headers={'Authorization': os.environ['PEXELS_API_KEY']}, timeout=10)
+              if r.status_code != 200: errors.append('Pexels: HTTP ' + str(r.status_code))
+          except Exception as e: errors.append('Pexels: ' + str(e))
+          try:
+              r = requests.get('https://api.unsplash.com/search/photos?query=test&per_page=1', headers={'Authorization': 'Client-ID ' + os.environ['UNSPLASH_ACCESS_KEY']}, timeout=10)
+              if r.status_code != 200: errors.append('Unsplash: HTTP ' + str(r.status_code))
+          except Exception as e: errors.append('Unsplash: ' + str(e))
+          try:
+              r = requests.get('https://api.telegram.org/bot' + os.environ['TELEGRAM_TOKEN'] + '/getMe', timeout=10)
+              if r.status_code != 200: errors.append('Telegram: HTTP ' + str(r.status_code))
+          except Exception as e: errors.append('Telegram: ' + str(e))
+          if errors:
+              print('API CHECK FAILED:')
+              for e in errors: print('  - ' + e)
+              sys.exit(1)
+          print('All API pre-flight checks passed.')
+          "
 
-      - name: Run production pipeline
+      - name: Run Ajeebology Shorts Pipeline
         id: pipeline
         run: |
           mkdir -p output
-          python youtube_agent.py \
-            --topic "${{ github.event.inputs.topic || 'random' }}" \
-            --output-dir ./output \
-            --force "${{ github.event.inputs.force_regenerate || false }}"
+          python youtube_agent.py --topic "${{ github.event.inputs.topic || 'random' }}" --output-dir ./output --force ${{ github.event.inputs.force_regenerate || false }} 2>&1 | tee output/pipeline.log
 
-      - name: Upload artifacts
+      - name: Upload production artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -95,13 +118,35 @@ jobs:
 
       - name: Verify outputs
         run: |
-          test -f output/video.mp4 || { echo "::error::Video file not produced!"; exit 1; }
-          test -f output/thumbnail.jpg || test -f output/thumbnail.png || { echo "::error::Thumbnail not produced!"; exit 1; }
+          if [ ! -f output/video.mp4 ]; then echo "::error::Video file not produced!"; exit 1; fi
+          if [ ! -f output/thumbnail.jpg ] && [ ! -f output/thumbnail.png ]; then echo "::error::Thumbnail not produced!"; exit 1; fi
+          echo "Outputs verified successfully."
           ls -lh output/
 
       - name: Send to Telegram
         if: success()
-        run: python youtube_agent.py --mode telegram --output-dir ./output
+        run: |
+          python -c "
+          import os, json, requests
+          output_dir = './output'
+          with open(os.path.join(output_dir, 'metadata.json'), 'r', encoding='utf-8') as f:
+              meta = json.load(f)
+          bot_token = os.environ['TELEGRAM_TOKEN']
+          chat_id = os.environ['TELEGRAM_CHAT_ID']
+          base_url = 'https://api.telegram.org/bot' + bot_token
+          sources_text = '\n'.join(['• ' + s['title'] + ': ' + s['url'] for s in meta.get('sources', [])[:3]])
+          caption = '📹 <b>' + meta['title'] + '</b>\n\n📝 <b>Description:</b>\n' + meta['description'][:300] + '...\n\n🏷 <b>Tags:</b> ' + ', '.join(meta['tags'][:5]) + '\n#️⃣ <b>Hashtags:</b> ' + ' '.join(meta['hashtags']) + '\n📂 <b>Category:</b> ' + meta['category'] + '\n⏱ <b>Duration:</b> ' + str(meta['duration']) + 's\n📊 <b>Size:</b> ' + str(meta.get('file_size_mb', 'N/A')) + ' MB\n\n🔬 <b>Sources:</b>\n' + sources_text + '\n\n🕐 <b>Generated:</b> ' + meta.get('timestamp', 'N/A')[:19]
+          video_path = os.path.join(output_dir, meta['video_filename'])
+          with open(video_path, 'rb') as vf:
+              r = requests.post(base_url + '/sendVideo', data={'chat_id': chat_id, 'caption': caption[:1024], 'parse_mode': 'HTML', 'supports_streaming': 'true'}, files={'video': vf}, timeout=120)
+              r.raise_for_status()
+          thumb_path = os.path.join(output_dir, meta['thumbnail_filename'])
+          with open(thumb_path, 'rb') as tf:
+              requests.post(base_url + '/sendDocument', data={'chat_id': chat_id, 'caption': '🖼 Thumbnail', 'parse_mode': 'HTML'}, files={'document': tf}, timeout=60)
+          with open(os.path.join(output_dir, 'metadata.json'), 'rb') as mf:
+              requests.post(base_url + '/sendDocument', data={'chat_id': chat_id, 'caption': '📋 Metadata JSON', 'parse_mode': 'HTML'}, files={'document': mf}, timeout=30)
+          print('Telegram delivery complete.')
+          "
 
       - name: Cleanup workspace
         if: always()
