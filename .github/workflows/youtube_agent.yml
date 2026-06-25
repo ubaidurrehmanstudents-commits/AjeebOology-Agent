@@ -99,7 +99,8 @@ jobs:
         id: pipeline
         run: |
           mkdir -p output
-          python youtube_agent.py --topic "${{ github.event.inputs.topic || 'random' }}" --output-dir ./output --force ${{ github.event.inputs.force_regenerate || false }} 2>&1 | tee output/pipeline.log
+                    python youtube_agent.py --topic "${{ github.event.inputs.topic || 'random' }}" --output-dir ./output 2>&1 | tee output/pipeline.log
+                    
 
       - name: Upload production artifacts
         uses: actions/upload-artifact@v4
