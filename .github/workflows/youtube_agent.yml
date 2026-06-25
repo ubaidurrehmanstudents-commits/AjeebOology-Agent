@@ -1,69 +1,115 @@
-name: Ajeebology Shorts Agent
+name: Ajeebology Shorts Pipeline
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "17 3 * * *"
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ajeebology-shorts-${{ github.ref }}
-  cancel-in-progress: true
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      topic_override:
+        description: 'Optional topic override (leave empty for auto)'
+        required: false
+        default: ''
 
 jobs:
-  build:
+  generate-short:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     env:
-      PYTHONUNBUFFERED: "1"
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PIP_NO_CACHE_DIR: "0"
-      GITHUB_ACTIONS: "true"
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TOPIC_OVERRIDE: ${{ github.event.inputs.topic_override }}
 
     steps:
-      - name: Checkout
+
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Set up FFmpeg
-        uses: AnimMouse/setup-ffmpeg@v1
-        with:
-          version: "7.1"
-
-      - name: Install Python dependencies
+      - name: Install System Dependencies
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests pydub pillow numpy
-          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            ffmpeg \
+            imagemagick \
+            fonts-dejavu-core \
+            fonts-liberation \
+            wget \
+            curl \
+            bc
+          # Remove ImageMagick policy restrictions for video processing
+          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-6/policy.xml || true
+          sudo sed -i 's/<policy domain="path" rights="none" pattern="@\*"\/>/<policy domain="path" rights="read|write" pattern="@*"\/>/' /etc/ImageMagick-6/policy.xml || true
 
-      - name: Run agent
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Install Python Dependencies
         run: |
-          mkdir -p output
+          pip install --upgrade pip --quiet
+          pip install \
+            groq \
+            tavily-python \
+            requests \
+            Pillow \
+            numpy \
+            gTTS \
+            pydub \
+            python-telegram-bot==20.7 \
+            aiohttp \
+            aiofiles \
+            tenacity \
+            colorlog \
+            python-dotenv \
+            httpx \
+            tqdm
+
+      - name: Verify FFmpeg Installation
+        run: |
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+          echo "FFmpeg verified successfully"
+
+      - name: Run Ajeebology Shorts Agent
+        id: run_agent
+        run: |
           python youtube_agent.py
+        continue-on-error: false
 
-      - name: Upload artifacts
+      - name: Upload Artifacts on Success
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ajeebology-shorts-output
+          name: ajeebology-short-${{ github.run_number }}
           path: |
-            output/*
-          if-no-files-found: warn
-          retention-days: 30
+            output/final_video.mp4
+            output/thumbnail.jpg
+            output/metadata.json
+            output/script.txt
+          retention-days: 7
+
+      - name: Upload Artifacts on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ajeebology-debug-${{ github.run_number }}
+          path: |
+            output/
+            *.log
+          retention-days: 3
+
+      - name: Report Job Status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Pipeline completed successfully - Run #${{ github.run_number }}"
+          else
+            echo "❌ Pipeline failed - Run #${{ github.run_number }}"
+            echo "Check debug artifacts for logs"
+          fi
