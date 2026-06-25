@@ -1,2263 +1,674 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Ajeebology Shorts
-Single-file YouTube Shorts Automation System
-
-Chunk 1:
-- Imports
-- Configuration
-- Environment Validation
-- Logging
-- Cache System
-- Utility Functions
-- API Clients
-- Topic Selection
-- Research Engine
-
-DO NOT RUN UNTIL ALL CHUNKS ARE COMBINED.
-"""
-
+## 🧩 CHUNK 1 – [Imports, Configuration, Utilities, Research, and Script Generation]
 import os
-import re
-import io
+import sys
 import json
-import time
-import math
-import glob
-import uuid
-import shutil
 import random
-import hashlib
 import logging
-import pathlib
-import tempfile
 import subprocess
+import shutil
+import textwrap
+import urllib.parse
 from datetime import datetime
-from typing import List, Dict, Any, Optional
-
 import requests
-import numpy as np
-
-from PIL import (
-    Image,
-    ImageDraw,
-    ImageFont,
-    ImageFilter,
-)
-
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 from groq import Groq
 from tavily import TavilyClient
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-)
-
-from pydub import (
-    AudioSegment,
-)
-
-from gtts import gTTS
-
-from telegram import Bot
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-ROOT = pathlib.Path(".")
-OUTPUT_DIR = ROOT / "outputs"
-CACHE_DIR = ROOT / "cache"
-ASSET_CACHE_DIR = ROOT / "assets_cache"
-LOG_DIR = ROOT / "logs"
-
-OUTPUT_DIR.mkdir(exist_ok=True)
-CACHE_DIR.mkdir(exist_ok=True)
-ASSET_CACHE_DIR.mkdir(exist_ok=True)
-LOG_DIR.mkdir(exist_ok=True)
-
-RUN_MODE = os.getenv("RUN_MODE", "render")
-LANGUAGE = os.getenv("LANGUAGE", "hinglish")
-
-VIDEO_WIDTH = 1080
-VIDEO_HEIGHT = 1920
-
-TARGET_DURATION_MIN = 55
-TARGET_DURATION_MAX = 65
-
-CHANNEL_NAME = "Ajeebology Shorts"
-
-VOICE_RATE = 145
-VOICE_PITCH = 60
-VOICE_GAP = 5
-
-MAX_SCENES = 8
-MIN_SCENES = 6
-
-TOPICS = [
-    "psychology fact",
-    "space mystery",
-    "human brain fact",
-    "black hole mystery",
-    "weird country fact",
-    "strange science fact",
-    "sleep psychology",
-    "ancient mystery",
-    "universe fact",
-    "mind trick"
-]
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-LOG_FILE = LOG_DIR / "youtube_agent.log"
-
+# ==========================================
+# 1. CONFIGURATION & LOGGING SETUP
+# ==========================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
+logger = logging.getLogger("AjeebologyAgent")
 
-logger = logging.getLogger("Ajeebology")
+# Directory Setup
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
 
-# ============================================================
-# ENVIRONMENT
-# ============================================================
+for d in [ASSETS_DIR, OUTPUT_DIR, TEMP_DIR]:
+    os.makedirs(d, exist_ok=True)
 
-class Config:
+# API Keys (Fail fast if missing)
+try:
+    GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+    TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
+    PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
+    UNSPLASH_ACCESS_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
+    TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+    TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+except KeyError as e:
+    logger.error(f"Missing required environment variable: {e}")
+    sys.exit(1)
 
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-    PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
-    UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Initialize Clients
+groq_client = Groq(api_key=GROQ_API_KEY)
+tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
+CATEGORIES = ["Psychology Facts", "Space Facts", "Weird World Facts"]
+TARGET_CATEGORY = random.choice(CATEGORIES)
 
-def validate_environment():
+# ==========================================
+# 2. UTILITY FUNCTIONS
+# ==========================================
+def cleanup_temp():
+    """Cleans up the temporary directory after processing."""
+    if os.path.exists(TEMP_DIR):
+        shutil.rmtree(TEMP_DIR)
+        os.makedirs(TEMP_DIR)
+    logger.info("Temporary files cleaned up.")
 
-    required = [
-        "GROQ_API_KEY",
-        "TAVILY_API_KEY",
-        "PEXELS_API_KEY",
-        "UNSPLASH_ACCESS_KEY",
-        "TELEGRAM_TOKEN",
-        "TELEGRAM_CHAT_ID"
-    ]
+def sanitize_filename(name):
+    return "".join([c for c in name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
 
-    missing = []
-
-    for key in required:
-        if not os.getenv(key):
-            missing.append(key)
-
-    if missing:
-        raise RuntimeError(
-            f"Missing environment variables: {', '.join(missing)}"
-        )
-
-    logger.info("Environment validation passed")
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def now_string():
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-
-def random_topic():
-    override = os.getenv("TOPIC_OVERRIDE")
-
-    if override:
-        return override
-
-    return random.choice(TOPICS)
-
-
-def clean_text(text: str) -> str:
-
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip()
-
-    return text
-
-
-def safe_filename(text: str) -> str:
-
-    text = re.sub(r"[^a-zA-Z0-9_-]", "_", text)
-
-    return text[:80]
-
-
-def hash_string(text: str) -> str:
-
-    return hashlib.md5(
-        text.encode("utf-8")
-    ).hexdigest()
-
-
-def save_json(path, data):
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-
-def load_json(path):
-
-    if not os.path.exists(path):
-        return None
-
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-# ============================================================
-# CACHE MANAGER
-# ============================================================
-
-class CacheManager:
-
-    def __init__(self):
-
-        self.cache_dir = CACHE_DIR
-
-    def path(self, key):
-
-        return self.cache_dir / f"{key}.json"
-
-    def get(self, key):
-
-        file = self.path(key)
-
-        if not file.exists():
-            return None
-
-        try:
-            return load_json(file)
-
-        except Exception:
-            return None
-
-    def set(self, key, value):
-
-        file = self.path(key)
-
-        save_json(file, value)
-
-
-cache = CacheManager()
-
-# ============================================================
-# HTTP CLIENT
-# ============================================================
-
-SESSION = requests.Session()
-
-SESSION.headers.update(
-    {
-        "User-Agent": "AjeebologyShortsBot/1.0"
-    }
-)
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=2)
-)
-def http_get(url, **kwargs):
-
-    r = SESSION.get(
-        url,
-        timeout=30,
-        **kwargs
+# ==========================================
+# 3. RESEARCH & SCRIPT GENERATION (AGENTS)
+# ==========================================
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def conduct_research(category):
+    """Fetches real, highly engaging facts using Tavily."""
+    logger.info(f"Conducting research for category: {category}...")
+    query = f"Mind-blowing, unknown, and fascinating {category.lower()} that sound fake but are true."
+    
+    response = tavily_client.search(
+        query=query,
+        search_depth="advanced",
+        max_results=3
     )
+    
+    context = "\n".join([result["content"] for result in response["results"]])
+    logger.info("Research completed successfully.")
+    return context
 
-    r.raise_for_status()
-
-    return r
-
-
-# ============================================================
-# GROQ CLIENT
-# ============================================================
-
-class GroqClient:
-
-    def __init__(self):
-
-        self.client = Groq(
-            api_key=Config.GROQ_API_KEY
-        )
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2)
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def generate_script(category, research_context):
+    """Generates a highly-retaining Hinglish script using Groq."""
+    logger.info("Generating Hinglish script via Groq...")
+    
+    prompt = f"""
+    You are a viral YouTube Shorts scriptwriter for 'Ajeebology Shorts'.
+    Target Audience: Youth in India/Pakistan. Language: Hinglish (Hindi/Urdu written in English alphabet, mixed with English words).
+    Topic: {category}.
+    
+    Use this research to find ONE mind-blowing fact:
+    {research_context}
+    
+    Rules for Script:
+    1. Hook (2-3 sec): Ask a surprising question or make a bold statement.
+    2. Revelation: Explain the fact with escalating excitement.
+    3. CTA: Quick subscribe ask for 'Ajeebology Shorts'.
+    4. Total words: 120-140 words (for 55-60 seconds audio).
+    5. No emojis in the spoken text.
+    
+    Output strictly in JSON format:
+    {{
+        "title": "Viral English Title here",
+        "description": "Short description with #hashtags",
+        "hook": "Hinglish hook here",
+        "segments": ["sentence 1", "sentence 2", "sentence 3", "sentence 4", "sentence 5", "sentence 6"],
+        "cta": "Hinglish subscribe ask here",
+        "search_queries": ["english search term 1", "english search term 2", "english search term 3"]
+    }}
+    """
+    
+    response = groq_client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model="llama3-70b-8192",
+        temperature=0.7,
+        response_format={"type": "json_object"}
     )
-    def generate(self, prompt):
-
-        completion = self.client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.9,
-            max_tokens=2000
-        )
-
-        return (
-            completion
-            .choices[0]
-            .message
-            .content
-        )
-
-
-# ============================================================
-# TAVILY RESEARCH CLIENT
-# ============================================================
-
-class ResearchClient:
-
-    def __init__(self):
-
-        self.client = TavilyClient(
-            api_key=Config.TAVILY_API_KEY
-        )
-
-    def search(self, query):
-
-        cache_key = (
-            "research_" +
-            hash_string(query)
-        )
-
-        cached = cache.get(cache_key)
-
-        if cached:
-            logger.info(
-                "Research cache hit"
-            )
-            return cached
-
-        try:
-
-            result = self.client.search(
-                query=query,
-                max_results=5
-            )
-
-            cache.set(
-                cache_key,
-                result
-            )
-
-            return result
-
-        except Exception as e:
-
-            logger.error(
-                f"Tavily failed: {e}"
-            )
-
-            return {
-                "results": []
-            }
-
-
-# ============================================================
-# RESEARCH ENGINE
-# ============================================================
-
-class TopicResearcher:
-
-    def __init__(self):
-
-        self.research = ResearchClient()
-
-    def build_research_query(
-        self,
-        topic
-    ):
-
-        return (
-            f"{topic} surprising fact "
-            f"science explanation"
-        )
-
-    def gather(self, topic):
-
-        logger.info(
-            f"Researching: {topic}"
-        )
-
-        query = self.build_research_query(
-            topic
-        )
-
-        data = self.research.search(
-            query
-        )
-
-        summaries = []
-
-        for item in data.get(
-            "results",
-            []
-        ):
-
-            content = item.get(
-                "content",
-                ""
-            )
-
-            if content:
-                summaries.append(content)
-
-        return "\n\n".join(
-            summaries
-        )[:6000]
-
-
-# ============================================================
-# SCRIPT GENERATOR
-# ============================================================
-
-class ScriptGenerator:
-
-    def __init__(self):
-
-        self.groq = GroqClient()
-
-    def build_prompt(
-        self,
-        topic,
-        research
-    ):
-
-        return f"""
-You are an elite YouTube Shorts writer.
-
-Language:
-{LANGUAGE}
-
-Topic:
-{topic}
-
-Research:
-{research}
-
-Requirements:
-
-1. Hook in first 2 seconds.
-2. Curiosity gap.
-3. Escalation.
-4. Surprise reveal.
-5. CTA.
-
-Output JSON:
-
-{{
- "title":"",
- "segments":[
-   {{
-     "text":"..."
-   }}
- ],
- "cta":"..."
-}}
-
-6-8 segments.
-55-65 second video.
-Male narration.
-"""
-
-
-        return clean_text(prompt)
-
-    def generate_script(
-        self,
-        topic,
-        research
-    ):
-
-        prompt = self.build_prompt(
-            topic,
-            research
-        )
-
-        raw = self.groq.generate(
-            prompt
-        )
-
-        try:
-
-            start = raw.find("{")
-            end = raw.rfind("}")
-
-            payload = raw[start:end+1]
-
-            data = json.loads(
-                payload
-            )
-
-            return data
-
-        except Exception as e:
-
-            logger.error(
-                f"Script parse failed: {e}"
-            )
-
-            return {
-                "title": f"Amazing {topic}",
-                "segments": [
-                    {
-                        "text":
-                        "Kya aap jante hain ek ajeeb fact?"
-                    },
-                    {
-                        "text":
-                        "Yeh sach hai aur scientists bhi hairan hain."
-                    },
-                    {
-                        "text":
-                        "Iska reason aur bhi shocking hai."
-                    },
-                    {
-                        "text":
-                        "Aur isi wajah se duniya ise fascinating maanti hai."
-                    },
-                    {
-                        "text":
-                        "Agar aapko yeh fact pasand aaya to comment karo."
-                    }
-                ],
-                "cta":
-                "Like, share aur subscribe."
-            }
-
-
-# ============================================================
-# METADATA GENERATOR
-# ============================================================
-
-class MetadataGenerator:
-
-    def generate(
-        self,
-        topic,
-        script
-    ):
-
-        title = script.get(
-            "title",
-            topic
-        )
-
-        segments = script.get(
-            "segments",
-            []
-        )
-
-        full_text = []
-
-        for seg in segments:
-
-            txt = seg.get(
-                "text",
-                ""
-            )
-
-            full_text.append(txt)
-
-        description = "\n".join(
-            full_text
-        )
-
-        description += (
-            "\n\nLike • Share • Subscribe "
-            "for more amazing facts."
-        )
-
-        tags = [
-            "shorts",
-            "facts",
-            "psychology",
-            "space",
-            "science",
-            "viral",
-            "youtube shorts",
-            "knowledge",
-            "interesting facts",
-            topic
-        ]
-
-        hashtags = [
-            "#shorts",
-            "#facts",
-            "#science",
-            "#viral",
-            "#knowledge"
-        ]
-
-        return {
-            "title": title,
-            "description": description,
-            "tags": tags,
-            "hashtags": hashtags
-        }
-
-
-# ============================================================
-# PEXELS CLIENT
-# ============================================================
-
-class PexelsClient:
-
-    BASE_URL = (
-        "https://api.pexels.com/videos/search"
-    )
-
-    def __init__(self):
-
-        self.api_key = (
-            Config.PEXELS_API_KEY
-        )
-
-    def search_videos(
-        self,
-        query,
-        per_page=10
-    ):
-
-        cache_key = (
-            "pexels_" +
-            hash_string(query)
-        )
-
-        cached = cache.get(
-            cache_key
-        )
-
-        if cached:
-            return cached
-
-        try:
-
-            response = http_get(
-                self.BASE_URL,
-                headers={
-                    "Authorization":
-                    self.api_key
-                },
-                params={
-                    "query": query,
-                    "per_page": per_page
-                }
-            )
-
+    
+    script_data = json.loads(response.choices[0].message.content)
+    logger.info(f"Script generated: {script_data['title']}")
+    return script_data
+
+# **After pasting this chunk, press Enter twice before pasting the next chunk.**
+
+# ==========================================
+# 4. ASSET FETCHING SYSTEM (PEXELS & UNSPLASH)
+# ==========================================
+def fetch_pexels_video(query, index):
+    """Fetches a vertical video from Pexels using direct HTTP API requests."""
+    logger.info(f"Searching Pexels for video: '{query}'...")
+    url = f"https://api.pexels.com/videos/search?query={urllib.parse.quote(query)}&per_page=5&orientation=portrait"
+    headers = {"Authorization": PEXELS_API_KEY}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
             data = response.json()
+            videos = data.get("videos", [])
+            if videos:
+                # Select a video, use index to rotate choices if called multiple times
+                video_data = videos[index % len(videos)]
+                video_files = video_data.get("video_files", [])
+                
+                # Try to find an HD mobile-friendly file or use the first available
+                best_file = next((f for f in video_files if f.get("quality") == "hd"), video_files[0])
+                video_url = best_file["link"]
+                
+                target_path = os.path.join(ASSETS_DIR, f"pexels_{sanitize_filename(query)}_{index}.mp4")
+                
+                logger.info(f"Downloading Pexels video: {video_url}")
+                v_res = requests.get(video_url, stream=True, timeout=30)
+                if v_res.status_code == 200:
+                    with open(target_path, "wb") as f:
+                        shutil.copyfileobj(v_res.raw, f)
+                    return target_path
+        logger.warning(f"Pexels API failed or returned no videos for '{query}'. Using fallback.")
+    except Exception as e:
+        logger.error(f"Error fetching Pexels video: {e}")
+    return None
 
-            cache.set(
-                cache_key,
-                data
-            )
-
-            return data
-
-        except Exception as e:
-
-            logger.error(
-                f"Pexels error: {e}"
-            )
-
-            return {
-                "videos": []
-            }
-
-
-# ============================================================
-# UNSPLASH CLIENT
-# ============================================================
-
-class UnsplashClient:
-
-    BASE_URL = (
-        "https://api.unsplash.com/search/photos"
-    )
-
-    def __init__(self):
-
-        self.api_key = (
-            Config.UNSPLASH_ACCESS_KEY
-        )
-
-    def search_images(
-        self,
-        query,
-        per_page=10
-    ):
-
-        cache_key = (
-            "unsplash_" +
-            hash_string(query)
-        )
-
-        cached = cache.get(
-            cache_key
-        )
-
-        if cached:
-            return cached
-
-        try:
-
-            response = http_get(
-                self.BASE_URL,
-                params={
-                    "query": query,
-                    "per_page": per_page,
-                    "client_id":
-                    self.api_key
-                }
-            )
-
+def fetch_unsplash_image(query, index):
+    """Fetches a high-res portrait image from Unsplash using direct HTTP requests."""
+    logger.info(f"Searching Unsplash for image: '{query}'...")
+    url = f"https://api.unsplash.com/search/photos?query={urllib.parse.quote(query)}&per_page=5&orientation=portrait"
+    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
             data = response.json()
-
-            cache.set(
-                cache_key,
-                data
-            )
-
-            return data
-
-        except Exception as e:
-
-            logger.error(
-                f"Unsplash error: {e}"
-            )
-
-            return {
-                "results": []
-            }
-
-
-# ============================================================
-# ASSET CACHE
-# ============================================================
-
-class AssetCache:
-
-    def __init__(self):
-
-        self.root = (
-            ASSET_CACHE_DIR
-        )
-
-    def download(
-        self,
-        url
-    ):
-
-        ext = (
-            url.split("?")[0]
-            .split(".")[-1]
-        )
-
-        if len(ext) > 6:
-            ext = "bin"
-
-        filename = (
-            hash_string(url)
-            + "."
-            + ext
-        )
-
-        path = (
-            self.root /
-            filename
-        )
-
-        if path.exists():
-
-            return str(path)
-
-        try:
-
-            r = http_get(
-                url,
-                stream=True
-            )
-
-            with open(
-                path,
-                "wb"
-            ) as f:
-
-                for chunk in r.iter_content(
-                    8192
-                ):
-                    f.write(chunk)
-
-            return str(path)
-
-        except Exception as e:
-
-            logger.error(
-                f"Download failed: {e}"
-            )
-
-            return None
-
-
-asset_cache = AssetCache()
-
-# ============================================================
-# ASSET COLLECTOR
-# ============================================================
-
-class AssetCollector:
-
-    def __init__(self):
-
-        self.pexels = (
-            PexelsClient()
-        )
-
-        self.unsplash = (
-            UnsplashClient()
-        )
-
-    def collect(
-        self,
-        topic,
-        scene_count
-    ):
-
-        assets = []
-
-        video_data = (
-            self.pexels
-            .search_videos(topic)
-        )
-
-        image_data = (
-            self.unsplash
-            .search_images(topic)
-        )
-
-        videos = (
-            video_data.get(
-                "videos",
-                []
-            )
-        )
-
-        images = (
-            image_data.get(
-                "results",
-                []
-            )
-        )
-
-        v_index = 0
-        i_index = 0
-
-        for idx in range(
-            scene_count
-        ):
-
-            use_video = (
-                idx % 2 == 0
-            )
-
-            if (
-                use_video and
-                v_index < len(videos)
-            ):
-
-                files = (
-                    videos[v_index]
-                    .get(
-                        "video_files",
-                        []
-                    )
-                )
-
-                v_index += 1
-
-                if files:
-
-                    best = sorted(
-                        files,
-                        key=lambda x:
-                        x.get(
-                            "width",
-                            0
-                        ),
-                        reverse=True
-                    )[0]
-
-                    assets.append(
-                        {
-                            "type":
-                            "video",
-                            "url":
-                            best["link"]
-                        }
-                    )
-
-                    continue
-
-            if (
-                i_index <
-                len(images)
-            ):
-
-                image = (
-                    images[i_index]
-                )
-
-                i_index += 1
-
-                assets.append(
-                    {
-                        "type":
-                        "image",
-                        "url":
-                        image["urls"][
-                            "regular"
-                        ]
-                    }
-                )
-
-        downloaded = []
-
-        for item in assets:
-
-            path = (
-                asset_cache.download(
-                    item["url"]
-                )
-            )
-
-            if path:
-
-                item["path"] = path
-
-                downloaded.append(
-                    item
-                )
-
-        return downloaded
-
-
-# ============================================================
-# SCENE PLANNER
-# ============================================================
-
-class ScenePlanner:
-
-    def create(
-        self,
-        script
-    ):
-
-        segments = (
-            script.get(
-                "segments",
-                []
-            )
-        )
-
-        count = len(
-            segments
-        )
-
-        duration = 60
-
-        per_scene = (
-            duration /
-            max(count, 1)
-        )
-
-        scenes = []
-
-        for i, seg in enumerate(
-            segments
-        ):
-
-            scenes.append(
-                {
-                    "index": i,
-                    "text":
-                    seg.get(
-                        "text",
-                        ""
-                    ),
-                    "duration":
-                    per_scene
-                }
-            )
-
-        return scenes
-
-
-# ============================================================
-# AUDIO ENGINE
-# ============================================================
-
-class AudioEngine:
-
-    def __init__(self):
-
-        pass
-
-    def voice_path(self):
-
-        return str(
-            OUTPUT_DIR /
-            "voice.wav"
-        )
-
-    def generate_espeak(
-        self,
-        text
-    ):
-
-        output = (
-            self.voice_path()
-        )
-
-        cmd = [
-            "espeak",
-            "-v",
-            "hi+m1",
-            "-s",
-            str(VOICE_RATE),
-            "-p",
-            str(VOICE_PITCH),
-            "-g",
-            str(VOICE_GAP),
-            "-w",
-            output,
-            text
+            results = data.get("results", [])
+            if results:
+                img_data = results[index % len(results)]
+                img_url = img_data["urls"]["regular"]
+                
+                target_path = os.path.join(ASSETS_DIR, f"unsplash_{sanitize_filename(query)}_{index}.jpg")
+                
+                logger.info(f"Downloading Unsplash image: {img_url}")
+                i_res = requests.get(img_url, stream=True, timeout=30)
+                if i_res.status_code == 200:
+                    with open(target_path, "wb") as f:
+                        shutil.copyfileobj(i_res.raw, f)
+                    return target_path
+        logger.warning(f"Unsplash API failed or returned no images for '{query}'. Using fallback.")
+    except Exception as e:
+        logger.error(f"Error fetching Unsplash image: {e}")
+    return None
+
+def get_scene_asset(query, index, prefer_video=True):
+    """Fetches and caches media assets, alternating types for retention diversity."""
+    # Check cache first
+    sanitized = sanitize_filename(query)
+    ext = ".mp4" if prefer_video else ".jpg"
+    cached_path = os.path.join(ASSETS_DIR, f"asset_{sanitized}_{index}{ext}")
+    
+    if os.path.exists(cached_path):
+        logger.info(f"Using cached asset: {cached_path}")
+        return cached_path, "video" if prefer_video else "image"
+
+    if prefer_video:
+        path = fetch_pexels_video(query, index)
+        if path:
+            shutil.copy(path, cached_path)
+            return cached_path, "video"
+        # Fallback to image if video fails
+        path = fetch_unsplash_image(query, index)
+        if path:
+            shutil.copy(path, cached_path)
+            return cached_path, "image"
+    else:
+        path = fetch_unsplash_image(query, index)
+        if path:
+            shutil.copy(path, cached_path)
+            return cached_path, "image"
+        # Fallback to video if image fails
+        path = fetch_pexels_video(query, index)
+        if path:
+            shutil.copy(path, cached_path)
+            return cached_path, "video"
+            
+    # Absolute system placeholder if both APIs completely fail
+    placeholder_path = os.path.join(ASSETS_DIR, f"placeholder_{index}.jpg")
+    if not os.path.exists(placeholder_path):
+        img = Image.new("RGB", (1080, 1920), color=(random.randint(10,50), random.randint(10,50), random.randint(10,50)))
+        img.save(placeholder_path)
+    return placeholder_path, "image"
+
+# ==========================================
+# 5. AUDIO & VOICEOVER GENERATION ENGINE
+# ==========================================
+def get_audio_duration(file_path):
+    """Calculates precisely how long an audio file is via ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nocreepy=1", file_path
+    ]
+    try:
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8").strip()
+        # Parse output safely handling any extra characters
+        duration_str = output.split('=')[-1]
+        return float(duration_str)
+    except Exception as e:
+        logger.error(f"Error reading audio duration: {e}")
+        return 5.0 # Safe fallback guess
+
+def generate_voiceover_segment(text, filename_prefix):
+    """Generates guaranteed MALE voice using espeak with clean gTTS fallback."""
+    out_wav = os.path.join(TEMP_DIR, f"{filename_prefix}.wav")
+    
+    # Attempt 1: Espeak for direct native localized Hinglish Male voice
+    try:
+        logger.info(f"Generating voiceover with espeak (hi+m1): '{text[:30]}...'")
+        cmd = ["espeak", "-v", "hi+m1", "-s", "145", "-p", "60", "-g", "5", "-w", out_wav, text]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if os.path.exists(out_wav) and os.path.getsize(out_wav) > 0:
+            return out_wav
+    except Exception as e:
+        logger.warning(f"Espeak compilation failed, shifting to safe backup gTTS: {e}")
+
+    # Attempt 2: gTTS Fallback
+    try:
+        from gtts import gTTS
+        logger.info(f"Generating backup voiceover with gTTS: '{text[:30]}...'")
+        temp_mp3 = os.path.join(TEMP_DIR, f"{filename_prefix}.mp3")
+        tts = gTTS(text=text, lang="hi", slow=False)
+        tts.save(temp_mp3)
+        
+        # Convert to production ready wav format using FFmpeg
+        cmd = ["ffmpeg", "-y", "-i", temp_mp3, "-acodec", "pcm_s16le", "-ar", "22050", out_wav]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return out_wav
+    except Exception as e:
+        logger.error(f"Critical Fail: Audio engine completely broke down on segment: {e}")
+        
+        # Absolute Emergency Floor Fallback: Generate completely silent WAV to prevent runtime crashes
+        cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono", "-t", "3", out_wav]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return out_wav
+
+# **After pasting this chunk, press Enter twice before pasting the next chunk.**
+
+
+# ==========================================
+# 6. SCENE PREPARATION & CANVAS PROCESSING
+# ==========================================
+def create_brander_clip(text, duration, filename):
+    """Generates clean, non-crashing intro/outro clips without emojis."""
+    out_path = os.path.join(TEMP_DIR, filename)
+    logger.info(f"Generating branding clip ({text}) -> {filename}")
+    
+    # Simple, highly stable FFmpeg filter chain creating a professional clean slate
+    cmd = [
+        "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={duration}:r=30",
+        "-vf", f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='{text}':fontcolor=white:fontsize=72:x=(w-text_w)/2:y=(h-text_h)/2",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return out_path
+    except Exception as e:
+        logger.error(f"Failed to generate branding clip: {e}")
+        # Absolute structural fallback: raw black clip
+        fallback_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={duration}:r=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path]
+        subprocess.run(fallback_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return out_path
+
+def process_video_scene(input_path, duration, output_path):
+    """Normalizes, crops, and forces raw videos into a standard 1080x1920 layout."""
+    logger.info(f"Processing scene video asset: {input_path} for {duration}s")
+    
+    # Scale and crop to fit 1080x1920 while ensuring smooth framerate (30fps)
+    vf_chain = (
+        f"scale=w='max(1080,ih*(1080/1920))':h='max(1920,iw*(1920/1080))',"
+        f"crop=1080:1920,"
+        f"zoompan=z='min(zoom+0.0015,1.1)':d=1:x='iw/2-w/2':y='ih/2-h/2':s=1080x1920"
+    )
+    
+    cmd = [
+        "ffmpeg", "-y", "-stream_loop", "-1", "-i", input_path,
+        "-t", str(duration), "-vf", vf_chain,
+        "-c:v", "libx264", "-profile:v", "main", "-level:v", "4.0",
+        "-pix_fmt", "yuv420p", "-r", "30", output_path
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        logger.error(f"Error optimizing video asset: {e}. Running structural recovery.")
+        # Basic fallback crop script if zoompan breaks down due to input codec constraints
+        fallback_vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+        cmd_fb = [
+            "ffmpeg", "-y", "-stream_loop", "-1", "-i", input_path,
+            "-t", str(duration), "-vf", fallback_vf,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", output_path
         ]
-
-        try:
-
-            subprocess.run(
-                cmd,
-                check=True
-            )
-
-            return output
-
-        except Exception as e:
-
-            logger.error(
-                f"espeak failed: {e}"
-            )
-
-            return None
-
-    def generate_gtts(
-        self,
-        text
-    ):
-
-        mp3 = (
-            OUTPUT_DIR /
-            "voice.mp3"
-        )
-
-        tts = gTTS(
-            text=text,
-            lang="hi"
-        )
-
-        tts.save(
-            str(mp3)
-        )
-
-        return str(mp3)
-
-
-
-# ============================================================
-# AUDIO PROCESSING
-# ============================================================
-
-class AudioProcessor:
-
-    def get_duration(self, audio_file):
-
-        try:
-
-            audio = AudioSegment.from_file(
-                audio_file
-            )
-
-            return (
-                len(audio) / 1000.0
-            )
-
-        except Exception as e:
-
-            logger.error(
-                f"Duration error: {e}"
-            )
-
-            return 0
-
-    def normalize(
-        self,
-        audio_file
-    ):
-
-        try:
-
-            audio = AudioSegment.from_file(
-                audio_file
-            )
-
-            target = -16
-
-            change = (
-                target -
-                audio.dBFS
-            )
-
-            normalized = (
-                audio.apply_gain(
-                    change
-                )
-            )
-
-            out = (
-                OUTPUT_DIR /
-                "voice_normalized.wav"
-            )
-
-            normalized.export(
-                out,
-                format="wav"
-            )
-
-            return str(out)
-
-        except Exception as e:
-
-            logger.error(
-                f"Normalize error: {e}"
-            )
-
-            return audio_file
-
-    def create_silence(
-        self,
-        seconds
-    ):
-
-        audio = (
-            AudioSegment.silent(
-                duration=int(
-                    seconds * 1000
-                )
-            )
-        )
-
-        out = (
-            OUTPUT_DIR /
-            "silence.wav"
-        )
-
-        audio.export(
-            out,
-            format="wav"
-        )
-
-        return str(out)
-
-
-audio_processor = AudioProcessor()
-
-# ============================================================
-# MUSIC ENGINE
-# ============================================================
-
-class MusicEngine:
-
-    def create_background_music(self):
-
-        silence = (
-            AudioSegment.silent(
-                duration=65000
-            )
-        )
-
-        path = (
-            OUTPUT_DIR /
-            "background.wav"
-        )
-
-        silence.export(
-            path,
-            format="wav"
-        )
-
-        return str(path)
-
-    def duck_music(
-        self,
-        music_file,
-        voice_file
-    ):
-
-        try:
-
-            music = AudioSegment.from_file(
-                music_file
-            )
-
-            voice = AudioSegment.from_file(
-                voice_file
-            )
-
-            music = music - 18
-
-            mixed = (
-                music.overlay(
-                    voice
-                )
-            )
-
-            output = (
-                OUTPUT_DIR /
-                "mixed_audio.wav"
-            )
-
-            mixed.export(
-                output,
-                format="wav"
-            )
-
-            return str(output)
-
-        except Exception as e:
-
-            logger.error(
-                f"Duck failed: {e}"
-            )
-
-            return voice_file
-
-
-music_engine = MusicEngine()
-
-# ============================================================
-# FFMPEG HELPERS
-# ============================================================
-
-class FFmpeg:
-
-    @staticmethod
-    def run(cmd):
-
-        logger.info(
-            " ".join(cmd)
-        )
-
-        subprocess.run(
-            cmd,
-            check=True
-        )
-
-    @staticmethod
-    def probe_duration(path):
-
-        try:
-
-            cmd = [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                path
-            ]
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True
-            )
-
-            return float(
-                result.stdout.strip()
-            )
-
-        except Exception:
-
-            return 5.0
-
-
-# ============================================================
-# INTRO BUILDER
-# ============================================================
-
-class IntroBuilder:
-
-    def build(self):
-
-        output = (
-            OUTPUT_DIR /
-            "intro.mp4"
-        )
-
-        filter_text = (
-            f"drawtext="
-            f"text='{CHANNEL_NAME}':"
-            f"fontsize=80:"
-            f"x=(w-text_w)/2:"
-            f"y=(h-text_h)/2:"
-            f"fontcolor=white"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=black:s=1080x1920:d=2",
-            "-vf",
-            filter_text,
-            "-pix_fmt",
-            "yuv420p",
-            str(output)
+        subprocess.run(cmd_fb, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def process_image_scene(input_path, duration, output_path):
+    """Converts static image assets into high-retention 1080x1920 video with camera panning."""
+    logger.info(f"Processing image asset into dynamic video clip: {input_path}")
+    
+    # Creating a motion picture from a static image through smooth mathematical coordinate adjustments
+    vf_chain = (
+        f"scale=8000:-1,zoompan=z='min(zoom+0.001,1.15)':x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)+sin(on/10)*10':d=1:s=1080x1920"
+    )
+    
+    cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", input_path,
+        "-t", str(duration), "-vf", vf_chain,
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", output_path
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        logger.error(f"Dynamic image scale failed: {e}. Executing standard rendering.")
+        fallback_vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+        cmd_fb = [
+            "ffmpeg", "-y", "-loop", "1", "-i", input_path,
+            "-t", str(duration), "-vf", fallback_vf,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", output_path
         ]
+        subprocess.run(cmd_fb, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        FFmpeg.run(cmd)
-
-        return str(output)
-
-
-# ============================================================
-# OUTRO BUILDER
-# ============================================================
-
-class OutroBuilder:
-
-    def build(self):
-
-        output = (
-            OUTPUT_DIR /
-            "outro.mp4"
+# ==========================================
+# 7. CAPTIONS & KINETIC TYPOGRAPHY GENERATOR
+# ==========================================
+def burn_kinetic_captions(video_path, text, output_path):
+    """Burns heavy stylized kinetic captions into the current active scene file."""
+    logger.info(f"Applying text overlays: '{text[:25]}...'")
+    
+    # Process text layout wrap limits safely for mobile phone viewport constraints
+    words = text.split()
+    lines = []
+    current_line = []
+    for word in words:
+        if len(" ".join(current_line + [word])) <= 18:
+            current_line.append(word)
+        else:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+    if current_line:
+        lines.append(" ".join(current_line))
+        
+    cleaned_text = "\\n".join(lines).replace("'", "").replace(":", "")
+    
+    # Kinetic animation sequence: Pop scale up text using sin function modulations
+    font_p = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    vf_caption = (
+        f"drawtext=fontfile={font_p}:text='{cleaned_text}':fontcolor=yellow:"
+        f"fontsize='70+10*sin(on/3)':x=(w-text_w)/2:y=(h-text_h)/2+200:"
+        f"borderw=5:bordercolor=black:line_spacing=15"
+    )
+    
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-vf", vf_caption, "-c:a", "copy", "-c:v", "libx264", output_path
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        logger.warning(f"Kinetic captions engine hit error: {e}. Defaulting to safe rendering.")
+        # Fallback to absolute standard solid bounding box placement layout
+        vf_fallback = (
+            f"drawtext=fontfile={font_p}:text='{cleaned_text}':fontcolor=white:"
+            f"fontsize=64:x=(w-text_w)/2:y=(h-text_h)/2+200:box=1:boxcolor=black@0.6:boxborderw=10"
         )
+        cmd_fb = ["ffmpeg", "-y", "-i", video_path, "-vf", vf_fallback, "-c:a", "copy", "-c:v", "libx264", output_path]
+        subprocess.run(cmd_fb, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        text = (
-            "Subscribe For More Facts"
-        )
-
-        filter_text = (
-            f"drawtext="
-            f"text='{text}':"
-            f"fontsize=70:"
-            f"x=(w-text_w)/2:"
-            f"y=(h-text_h)/2:"
-            f"fontcolor=white"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=black:s=1080x1920:d=2",
-            "-vf",
-            filter_text,
-            "-pix_fmt",
-            "yuv420p",
-            str(output)
-        ]
-
-        FFmpeg.run(cmd)
-
-        return str(output)
+# **After pasting this chunk, press Enter twice before pasting the next chunk.**
 
 
-# ============================================================
-# SCENE RENDERER
-# ============================================================
+# ==========================================
+# 8. AUDIO MIXING & DUCKING ENGINE
+# ==========================================
+def create_final_audio_track(vo_segments, total_duration, output_audio_path):
+    """Combines all scene voiceovers and mixes them with a synthesized ducked background track."""
+    logger.info("Assembling and mixing final audio tracks...")
+    
+    # 1. Concatenate all segment WAV files into one master voiceover track
+    concat_list_path = os.path.join(TEMP_DIR, "audio_concat.txt")
+    with open(concat_list_path, "w") as f:
+        for vo in vo_segments:
+            f.write(f"file '{vo}'\n")
+            
+    master_vo = os.path.join(TEMP_DIR, "master_vo.wav")
+    cmd_concat = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path, "-c", "copy", master_vo]
+    subprocess.run(cmd_concat, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    # 2. Generate a professional low-frequency cinematic ambient pad as background music
+    bg_music = os.path.join(TEMP_DIR, "synthesized_bg.wav")
+    bg_cmd = [
+        "ffmpeg", "-y", "-f", "lavfi", 
+        "-i", f"sine=frequency=80:sample_rate=22050:duration={total_duration}",
+        "-af", "volume=0.15,lowpass=f=300", bg_music
+    ]
+    subprocess.run(bg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    # 3. Mix master voiceover with the background pad using audio ducking properties via amix
+    mix_cmd = [
+        "ffmpeg", "-y", "-i", master_vo, "-i", bg_music,
+        "-filter_complex", "amix=inputs=2:duration=first:dropout_transition=2",
+        "-acodec", "pcm_s16le", "-ar", "22050", output_audio_path
+    ]
+    try:
+        subprocess.run(mix_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        logger.error(f"Audio mixing failed: {e}. Defaulting to raw master voiceover track.")
+        shutil.copy(master_vo, output_audio_path)
 
-class SceneRenderer:
+# ==========================================
+# 9. THUMBNAIL CREATION ENGINE
+# ==========================================
+def generate_viral_thumbnail(video_path, title_text, output_thumb_path):
+    """Extracts a high-motion frame from the video and applies viral graphic styles."""
+    logger.info("Generating high-retention thumbnail image...")
+    raw_frame = os.path.join(TEMP_DIR, "raw_frame.jpg")
+    
+    # Extract a clean video frame from 3 seconds into the timeline
+    extract_cmd = ["ffmpeg", "-y", "-ss", "00:00:03", "-i", video_path, "-vframes", "1", "-q:v", "2", raw_frame]
+    try:
+        subprocess.run(extract_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Open frame with Pillow for high-quality filters and composition
+        img = Image.open(raw_frame)
+        width, height = img.size
+        
+        # Apply slight contrast and saturation pop
+        img = ImageEnhance.Contrast(img).enhance(1.3)
+        img = ImageEnhance.Color(img).enhance(1.4)
+        
+        # Create dark atmospheric vignette overlay
+        vignette = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw_v = ImageDraw.Draw(vignette)
+        draw_v.ellipse([-100, -100, width + 100, height + 100], outline=(0, 0, 0, 200), width=180)
+        img.paste(vignette, (0, 0), vignette)
+        
+        # Add high-contrast oversized bold text overlay
+        draw = ImageDraw.Draw(img)
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        font = ImageFont.truetype(font_path, size=75)
+        
+        # Wrap title text safely
+        words = title_text.split()[:4]  # Maximum 4-5 words for extreme mobile scannability
+        short_title = " ".join(words).upper()
+        wrapped_lines = textwrap.wrap(short_title, width=12)
+        
+        y_text = height // 3
+        for line in wrapped_lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            w_text = bbox[2] - bbox[0]
+            h_text = bbox[3] - bbox[1]
+            
+            # Draw heavy black shadow drop box behind typography text
+            draw.text(((width - w_text) // 2 + 6, y_text + 6), line, font=font, fill=(0, 0, 0))
+            draw.text(((width - w_text) // 2, y_text), line, font=font, fill=(255, 255, 0)) # Neon Viral Yellow
+            y_text += h_text + 30
+            
+        img.save(output_thumb_path, "JPEG", quality=95)
+        logger.info("Thumbnail generation processing executed cleanly.")
+    except Exception as e:
+        logger.error(f"Thumbnail generation system failed: {e}. Building emergency canvas graphic.")
+        emergency_img = Image.new("RGB", (1080, 1920), color=(20, 20, 20))
+        emergency_img.save(output_thumb_path)
 
-    def image_scene(
-        self,
-        image_path,
-        duration,
-        index
-    ):
-
-        output = (
-            OUTPUT_DIR /
-            f"scene_{index}.mp4"
-        )
-
-        vf = (
-            "scale=1080:1920,"
-            "zoompan="
-            "z='min(zoom+0.0015,1.3)':"
-            "d=125"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            image_path,
-            "-t",
-            str(duration),
-            "-vf",
-            vf,
-            "-pix_fmt",
-            "yuv420p",
-            str(output)
-        ]
-
-        FFmpeg.run(cmd)
-
-        return str(output)
-
-    def video_scene(
-        self,
-        video_path,
-        duration,
-        index
-    ):
-
-        output = (
-            OUTPUT_DIR /
-            f"scene_{index}.mp4"
-        )
-
-        vf = (
-            "scale=1080:1920,"
-            "crop=1080:1920"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-t",
-            str(duration),
-            "-vf",
-            vf,
-            "-an",
-            str(output)
-        ]
-
-        FFmpeg.run(cmd)
-
-        return str(output)
-
-    def render(
-        self,
-        asset,
-        duration,
-        index
-    ):
-
-        if (
-            asset["type"]
-            == "image"
-        ):
-
-            return self.image_scene(
-                asset["path"],
-                duration,
-                index
+# ==========================================
+# 10. AUTOMATED TELEGRAM DISTRIBUTION PIPELINE
+# ==========================================
+def dispatch_to_telegram(video_path, thumb_path, script_data):
+    """Dispatches the finalized high-retention short asset directly to your mobile via Telegram API."""
+    logger.info("Dispatching generated media assets to Telegram...")
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    
+    caption_text = (
+        f"🎬 **AJEEBOLOGY SHORTS PRODUCTION**\n\n"
+        f"📌 **Title:** {script_data['title']}\n\n"
+        f"📝 **Description & SEO Tags:**\n{script_data['description']}\n\n"
+        f"🚀 *Status: Ready for Manual Upload to YouTube Shorts!*"
+    )
+    
+    # 1. Deliver the Viral Cover Thumbnail Graphic First
+    try:
+        with open(thumb_path, "rb") as photo:
+            p_res = requests.post(
+                f"{base_url}/sendPhoto",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"🖼 Thumbnail for: {script_data['title']}"},
+                files={"photo": photo},
+                timeout=30
             )
+        if p_res.status_code != 200:
+            logger.error(f"Telegram Thumbnail upload response failure: {p_res.text}")
+    except Exception as e:
+        logger.error(f"Failed to push thumbnail image to Telegram: {e}")
 
-        return self.video_scene(
-            asset["path"],
-            duration,
-            index
-        )
-
-
-scene_renderer = SceneRenderer()
-
-# ============================================================
-# CAPTION ENGINE
-# ============================================================
-
-class CaptionEngine:
-
-    def create_srt(
-        self,
-        scenes
-    ):
-
-        srt = (
-            OUTPUT_DIR /
-            "captions.srt"
-        )
-
-        current = 0.0
-
-        lines = []
-
-        for idx, scene in enumerate(
-            scenes,
-            start=1
-        ):
-
-            start = current
-            end = (
-                current +
-                scene["duration"]
+    # 2. Deliver the Final Master Compiled Video File Package
+    try:
+        with open(video_path, "rb") as video:
+            v_res = requests.post(
+                f"{base_url}/sendVideo",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption_text, "parse_mode": "Markdown"},
+                files={"video": video},
+                timeout=120
             )
-
-            current = end
-
-            def fmt(sec):
-
-                ms = int(
-                    (sec % 1) * 1000
-                )
-
-                total = int(sec)
-
-                h = total // 3600
-                m = (
-                    total % 3600
-                ) // 60
-
-                s = total % 60
-
-                return (
-                    f"{h:02}:{m:02}:{s:02},{ms:03}"
-                )
-
-            lines.append(
-                str(idx)
-            )
-
-            lines.append(
-                f"{fmt(start)} --> {fmt(end)}"
-            )
-
-            lines.append(
-                scene["text"]
-            )
-
-            lines.append("")
-
-
-        with open(
-            srt,
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            f.write(
-                "\n".join(lines)
-            )
-
-        return str(srt)
-
-
-caption_engine = CaptionEngine()
-
-# ============================================================
-# VIDEO ASSEMBLER
-# ============================================================
-
-class VideoAssembler:
-
-    def create_concat_file(
-        self,
-        files
-    ):
-
-        concat = (
-            OUTPUT_DIR /
-            "concat.txt"
-        )
-
-        with open(
-            concat,
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            for item in files:
-
-                if os.path.exists(item):
-
-                    f.write(
-                        f"file '{os.path.abspath(item)}'\n"
-                    )
-
-        return str(concat)
-
-    def concat(
-        self,
-        files
-    ):
-
-        concat_file = (
-            self.create_concat_file(
-                files
-            )
-        )
-
-        output = (
-            OUTPUT_DIR /
-            "video_base.mp4"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            concat_file,
-            "-c",
-            "copy",
-            str(output)
-        ]
-
-        try:
-
-            FFmpeg.run(cmd)
-
-        except Exception:
-
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                concat_file,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                str(output)
-            ]
-
-            FFmpeg.run(cmd)
-
-        return str(output)
-
-    def burn_captions(
-        self,
-        video,
-        srt_file
-    ):
-
-        output = (
-            OUTPUT_DIR /
-            "video_captioned.mp4"
-        )
-
-        vf = (
-            f"subtitles={srt_file}"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video,
-            "-vf",
-            vf,
-            "-c:a",
-            "copy",
-            str(output)
-        ]
-
-        FFmpeg.run(cmd)
-
-        return str(output)
-
-    def add_audio(
-        self,
-        video,
-        audio
-    ):
-
-        output = (
-            OUTPUT_DIR /
-            "final_video.mp4"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video,
-            "-i",
-            audio,
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-shortest",
-            str(output)
-        ]
-
-        FFmpeg.run(cmd)
-
-        return str(output)
-
-
-video_assembler = VideoAssembler()
-
-# ============================================================
-# THUMBNAIL ENGINE
-# ============================================================
-
-class ThumbnailGenerator:
-
-    def create(
-        self,
-        video_path,
-        title
-    ):
-
-        frame = (
-            OUTPUT_DIR /
-            "frame.jpg"
-        )
-
-        thumb = (
-            OUTPUT_DIR /
-            "thumbnail.jpg"
-        )
-
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-ss",
-            "00:00:03",
-            "-vframes",
-            "1",
-            str(frame)
-        ]
-
-        FFmpeg.run(cmd)
-
-        image = Image.open(
-            frame
-        )
-
-        image = image.resize(
-            (
-                1080,
-                1920
-            )
-        )
-
-        overlay = Image.new(
-            "RGBA",
-            image.size,
-            (0, 0, 0, 80)
-        )
-
-        image = Image.alpha_composite(
-            image.convert("RGBA"),
-            overlay
-        )
-
-        draw = ImageDraw.Draw(
-            image
-        )
-
-        try:
-
-            font = (
-                ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                    90
-                )
-            )
-
-        except Exception:
-
-            font = (
-                ImageFont.load_default()
-            )
-
-        text = (
-            title[:40]
-        )
-
-        draw.text(
-            (
-                50,
-                1300
-            ),
-            text,
-            fill="white",
-            font=font
-        )
-
-        draw.text(
-            (
-                50,
-                1600
-            ),
-            CHANNEL_NAME,
-            fill="yellow",
-            font=font
-        )
-
-        image = image.filter(
-            ImageFilter.SHARPEN
-        )
-
-        image.convert(
-            "RGB"
-        ).save(
-            thumb,
-            quality=95
-        )
-
-        return str(thumb)
-
-
-thumbnail_generator = (
-    ThumbnailGenerator()
-)
-
-# ============================================================
-# TELEGRAM DELIVERY
-# ============================================================
-
-class TelegramSender:
-
-    def __init__(self):
-
-        self.token = (
-            Config.TELEGRAM_TOKEN
-        )
-
-        self.chat_id = (
-            Config.TELEGRAM_CHAT_ID
-        )
-
-    def send_video(
-        self,
-        video,
-        caption
-    ):
-
-        try:
-
-            bot = Bot(
-                token=self.token
-            )
-
-            with open(
-                video,
-                "rb"
-            ) as fp:
-
-                bot.send_video(
-                    chat_id=self.chat_id,
-                    video=fp,
-                    caption=caption[:1000]
-                )
-
-            logger.info(
-                "Telegram video sent"
-            )
-
-        except Exception as e:
-
-            logger.error(
-                f"Telegram video failed: {e}"
-            )
-
-    def send_photo(
-        self,
-        photo,
-        caption=""
-    ):
-
-        try:
-
-            bot = Bot(
-                token=self.token
-            )
-
-            with open(
-                photo,
-                "rb"
-            ) as fp:
-
-                bot.send_photo(
-                    chat_id=self.chat_id,
-                    photo=fp,
-                    caption=caption[:1000]
-                )
-
-        except Exception as e:
-
-            logger.error(
-                f"Telegram photo failed: {e}"
-            )
-
-
-telegram_sender = (
-    TelegramSender()
-)
-
-# ============================================================
-# PIPELINE
-# ============================================================
-
-class ShortsPipeline:
-
-    def __init__(self):
-
-        self.researcher = (
-            TopicResearcher()
-        )
-
-        self.writer = (
-            ScriptGenerator()
-        )
-
-        self.assets = (
-            AssetCollector()
-        )
-
-        self.planner = (
-            ScenePlanner()
-        )
-
-        self.audio = (
-            AudioEngine()
-        )
-
-        self.meta = (
-            MetadataGenerator()
-        )
-
-    def build_voice(
-        self,
-        scenes
-    ):
-
-        script_text = []
-
-        for scene in scenes:
-
-            script_text.append(
-                scene["text"]
-            )
-
-        narration = (
-            " ".join(
-                script_text
-            )
-        )
-
-        voice = (
-            self.audio
-            .generate_espeak(
-                narration
-            )
-        )
-
-        if not voice:
-
-            voice = (
-                self.audio
-                .generate_gtts(
-                    narration
-                )
-            )
-
-        return voice
-
-    def render(self):
-
-        topic = random_topic()
-
-        logger.info(
-            f"Topic: {topic}"
-        )
-
-        research = (
-            self.researcher
-            .gather(topic)
-        )
-
-        script = (
-            self.writer
-            .generate_script(
-                topic,
-                research
-            )
-        )
-
-        scenes = (
-            self.planner
-            .create(script)
-        )
-
-        assets = (
-            self.assets
-            .collect(
-                topic,
-                len(scenes)
-            )
-        )
-
-        if not assets:
-
-            raise RuntimeError(
-                "No assets found"
-            )
-
-        voice = (
-            self.build_voice(
-                scenes
-            )
-        )
-
-        voice = (
-            audio_processor
-            .normalize(
-                voice
-            )
-        )
-
-        music = (
-            music_engine
-            .create_background_music()
-        )
-
-        mixed_audio = (
-            music_engine
-            .duck_music(
-                music,
-                voice
-            )
-        )
-
-        intro = (
-            IntroBuilder()
-            .build()
-        )
-
-        outro = (
-            OutroBuilder()
-            .build()
-        )
-
-        rendered = []
-
-        rendered.append(
-            intro
-        )
-
-        for i, scene in enumerate(
-            scenes
-        ):
-
-            asset = (
-                assets[
-                    i % len(assets)
-                ]
-            )
-
-            rendered.append(
-                scene_renderer.render(
-                    asset,
-                    scene["duration"],
-                    i
-                )
-            )
-
-        rendered.append(
-            outro
-        )
-
-        base_video = (
-            video_assembler
-            .concat(
-                rendered
-            )
-        )
-
-        srt = (
-            caption_engine
-            .create_srt(
-                scenes
-            )
-        )
-
-        captioned = (
-            video_assembler
-            .burn_captions(
-                base_video,
-                srt
-            )
-        )
-
-        final_video = (
-            video_assembler
-            .add_audio(
-                captioned,
-                mixed_audio
-            )
-        )
-
-        metadata = (
-            self.meta.generate(
-                topic,
-                script
-            )
-        )
-
-        thumb = (
-            thumbnail_generator
-            .create(
-                final_video,
-                metadata["title"]
-            )
-        )
-
-        save_json(
-            OUTPUT_DIR /
-            "metadata.json",
-            metadata
-        )
-
-        telegram_sender.send_video(
-            final_video,
-            metadata["title"]
-        )
-
-        telegram_sender.send_photo(
-            thumb,
-            metadata["title"]
-        )
-
-        logger.info(
-            "Pipeline complete"
-        )
-
-        return {
-            "video":
-            final_video,
-            "thumbnail":
-            thumb,
-            "metadata":
-            metadata
-        }
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
+        if v_res.status_code == 200:
+            logger.info("🚀 Automation Cycle Complete! Final video package pushed to Telegram.")
+        else:
+            logger.error(f"Telegram Video upload response failure: {v_res.text}")
+    except Exception as e:
+        logger.error(f"Failed to push video package to Telegram: {e}")
+
+# ==========================================
+# 11. CENTRAL SYSTEM ORCHESTRATOR (MAIN)
+# ==========================================
 def main():
-
-    validate_environment()
-
-    logger.info(
-        f"Mode: {RUN_MODE}"
-    )
-
-    if RUN_MODE == "validate":
-
-        logger.info(
-            "Validation successful"
-        )
-
-        return
-
-    if RUN_MODE == "preview":
-
-        topic = random_topic()
-
-        researcher = (
-            TopicResearcher()
-        )
-
-        writer = (
-            ScriptGenerator()
-        )
-
-        research = (
-            researcher.gather(
-                topic
-            )
-        )
-
-        script = (
-            writer.generate_script(
-                topic,
-                research
-            )
-        )
-
-        print(
-            json.dumps(
-                script,
-                indent=2,
-                ensure_ascii=False
-            )
-        )
-
-        return
-
-    pipeline = (
-        ShortsPipeline()
-    )
-
-    pipeline.render()
-
+    logger.info("Initializing Full Automated YouTube Shorts Pipeline...")
+    cleanup_temp()
+    
+    # Run Research Agent
+    research_data = conduct_research(TARGET_CATEGORY)
+    
+    # Run Script Writing Agent
+    script = generate_script(TARGET_CATEGORY, research_data)
+    
+    # Phase 1: Generate Branded Intro Clip Block
+    intro_clip = create_brander_clip("AJEEBOLOGY\nSHORTS", 2.0, "intro.mp4")
+    
+    # Phase 2: Iterate and process narrative voice over script clips
+    processed_scene_clips = [intro_clip]
+    vo_files = []
+    
+    all_segments = script["segments"] + [script["cta"]]
+    search_queries = script["search_queries"]
+    
+    for idx, segment_text in enumerate(all_segments):
+        logger.info(f"Processing structural timeline scene segment [{idx+1}/{len(all_segments)}]")
+        
+        # 1. Render and track localized voice file
+        vo_path = generate_voiceover_segment(segment_text, f"vo_seg_{idx}")
+        vo_files.append(vo_path)
+        
+        # Determine exact scene timing track duration
+        scene_duration = get_audio_duration(vo_path) + 0.4  # Includes small safety padding buffer
+        
+        # 2. Pull optimal context search term
+        query_term = search_queries[idx % len(search_queries)]
+        # Alternate visual layouts to maximize structural audience retention metrics
+        prefer_video_format = (idx % 2 == 0)
+        
+        raw_asset, asset_type = get_scene_asset(query_term, idx, prefer_video=prefer_video_format)
+        
+        # 3. Canvas scale and adapt layout
+        normalized_scene = os.path.join(TEMP_DIR, f"normalized_scene_{idx}.mp4")
+        if asset_type == "video":
+            process_video_scene(raw_asset, scene_duration, normalized_scene)
+        else:
+            process_image_scene(raw_asset, scene_duration, normalized_scene)
+            
+        # 4. Apply Kinetic Type Overlay Over Canvas
+        captioned_scene = os.path.join(TEMP_DIR, f"captioned_scene_{idx}.mp4")
+        burn_kinetic_captions(normalized_scene, segment_text, captioned_scene)
+        
+        processed_scene_clips.append(captioned_scene)
+        
+    # Phase 3: Generate Branded Outro CTA Clip Block
+    outro_clip = create_brander_clip("SUBSCRIBE FOR\nMORE FACTS!", 2.0, "outro.mp4")
+    processed_scene_clips.append(outro_clip)
+    
+    # Phase 4: Compile Final Base Video Array Sequence
+    video_concat_txt = os.path.join(TEMP_DIR, "video_concat.txt")
+    with open(video_concat_txt, "w") as f:
+        for clip in processed_scene_clips:
+            f.write(f"file '{clip}'\n")
+            
+    raw_merged_video = os.path.join(TEMP_DIR, "raw_merged_output.mp4")
+    cmd_merge = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", video_concat_txt, "-c:v", "libx264", "-an", raw_merged_video]
+    subprocess.run(cmd_merge, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    # Calculate global tracking timeline durations
+    total_video_duration = 2.0 + sum([get_audio_duration(v) + 0.4 for v in vo_files]) + 2.0
+    
+    # Phase 5: Master audio track distribution compilation mix
+    mixed_audio_track = os.path.join(TEMP_DIR, "master_mixed_audio.wav")
+    # Generate audio for the length of segments only (offsetting for silent intro/outro)
+    segment_total_duration = sum([get_audio_duration(v) + 0.4 for v in vo_files])
+    create_final_audio_track(vo_files, segment_total_duration, mixed_audio_track)
+    
+    # Phase 6: Finalize Master Render via Audio/Video Multiplexing mapping
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    final_video_name = f"AjeebologyShort_{timestamp}.mp4"
+    final_video_output = os.path.join(OUTPUT_DIR, final_video_name)
+    
+    # Multiplex audio onto video stream with intro/outro delays cleanly set
+    mux_cmd = [
+        "ffmpeg", "-y", "-i", raw_merged_video, "-i", mixed_audio_track,
+        "-filter_complex", "[1:a]adelay=2000|2000[delayed_audio]", # Delay audio by 2 seconds for intro clip buffer
+        "-map", "0:v", "-map", "[delayed_audio]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-shortest", final_video_output
+    ]
+    
+    logger.info("Running final structural mux render cycle...")
+    subprocess.run(mux_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    # Phase 7: Extract Thumbnail Cover
+    final_thumbnail_output = os.path.join(OUTPUT_DIR, f"Thumbnail_{timestamp}.jpg")
+    generate_viral_thumbnail(final_video_output, script["title"], final_thumbnail_output)
+    
+    # Phase 8: Package Delivery Dispatch Routing
+    dispatch_to_telegram(final_video_output, final_thumbnail_output, script)
+    
+    # Complete Local Storage Archival Save States
+    with open(os.path.join(OUTPUT_DIR, f"Metadata_{timestamp}.json"), "w") as f:
+        json.dump(script, f, indent=4)
+        
+    cleanup_temp()
+    logger.info("--- PRODUCTION WORKFLOW AGENT LIFECYCLE COMPLETED SUCCESSFULLY ---")
 
 if __name__ == "__main__":
-
-    main()
+    try:
+        main()
+    except Exception as main_err:
+        logger.critical(f"Pipeline crashed catastrophically during master execute block: {main_err}")
+        sys.exit(1)
+        
