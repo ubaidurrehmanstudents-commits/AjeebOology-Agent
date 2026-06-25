@@ -377,14 +377,34 @@ Rules:
             log(f"Research failed: {e}", "WARN")
             return [ResearchSource(title=f"Wikipedia: {topic}", url=f"https://en.wikipedia.org/wiki/{topic.replace(' ', '_')}")]
 
-    def generate_tts(self, script: str, output_dir: str) -> str:
+        def generate_tts(self, script: str, output_dir: str) -> str:
         audio_path = os.path.join(output_dir, "voiceover.mp3")
-        self.groq.generate_speech(script, audio_path, voice="Arabella")
-        duration = get_duration(audio_path)
-        log(f"TTS duration: {duration:.1f}s")
-        if duration < MIN_DURATION or duration > MAX_DURATION:
-            log(f"WARNING: Audio {duration:.1f}s outside range", "WARN")
-        return audio_path
+        
+        # Try Groq TTS first
+        try:
+            self.groq.generate_speech(script, audio_path, voice="Arabella")
+            duration = get_duration(audio_path)
+            log(f"TTS duration: {duration:.1f}s")
+            if duration >= MIN_DURATION:
+                return audio_path
+            log("Groq TTS too short, trying fallback", "WARN")
+        except Exception as e:
+            log(f"Groq TTS failed: {e}, using fallback", "WARN")
+        
+        # Fallback: gTTS (Google TTS, free, no API key)
+        try:
+            from gtts import gTTS
+            tts = gTTS(text=script, lang='en', slow=False)
+            tts.save(audio_path)
+            duration = get_duration(audio_path)
+            log(f"gTTS duration: {duration:.1f}s")
+            if duration < MIN_DURATION or duration > MAX_DURATION:
+                log(f"WARNING: Audio {duration:.1f}s outside range", "WARN")
+            return audio_path
+        except Exception as e:
+            log(f"gTTS also failed: {e}", "ERROR")
+            raise
+            
 
     def generate_title(self, topic: str, script: str) -> str:
         system_prompt = """You are a YouTube Shorts title expert.
