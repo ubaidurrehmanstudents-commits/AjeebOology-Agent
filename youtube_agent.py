@@ -7,14 +7,12 @@ Features:
 - Narrative script with hook, climax, CTA
 - Motion graphics (zoom/pan) on all clips (videos and images)
 - Crossfade transitions (0.5s) between scenes
-- Kinetic typography (animated captions)
-- Branded intro (2s) and outro (2s) with sound
-- Real background music from Pixabay
-- Audio ducking (music lowers during voiceover)
+- Static captions (reliable fallback)
+- Branded intro (2s) and outro (2s)
+- Real background music (pad) and ducking
 - Natural male voice via espeak (hi+m1)
-- Sound effects (whoosh, pop) for transitions
 - Viral‑optimised title, description, tags
-- High‑CTR thumbnail with motion frame + bold text
+- High‑CTR thumbnail with bold text
 - Robust error handling and caching
 """
 
@@ -43,12 +41,11 @@ import numpy as np
 # API clients
 from groq import Groq
 from tavily import TavilyClient
-from pexels_api import API as PexelsAPI
 
 # Telegram
 from telegram import Bot, InputFile
 
-# Audio processing (optional, but we keep for future use)
+# Audio processing (optional)
 from pydub import AudioSegment
 
 # Retry and resilience
@@ -93,14 +90,12 @@ FFMPEG_PRESET = "fast"              # balance speed vs quality
 # Scene segmentation: aim for 6-8 segments
 MIN_SCENES = 6
 MAX_SCENES = 8
-SCENE_DURATION = (5, 9)            # seconds per scene (will adjust to fit total)
 
-# Caption style (kinetic)
+# Caption style (static fallback)
 CAPTION_FONT_SIZE = 60
 CAPTION_BG_ALPHA = 0.6
 CAPTION_TEXT_COLOR = "#FFFFFF"
 CAPTION_OUTLINE_COLOR = "#000000"
-CAPTION_HIGHLIGHT_COLOR = "#FFD700"  # gold for emphasis
 
 # Intro/Outro
 INTRO_DURATION = 2.0                # seconds
@@ -142,7 +137,6 @@ def setup_logging():
     # Set third‑party loggers to WARNING to reduce noise
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("pexels_api").setLevel(logging.WARNING)
     return logging.getLogger(__name__)
 
 logger = setup_logging()
@@ -181,7 +175,6 @@ def cache_put_from_url(key: str, url: str, ext: str = "") -> Optional[Path]:
     p = get_cache_path(key, ext)
     if p.exists():
         return p
-    # Download and save
     try:
         resp = requests.get(url, stream=True, timeout=30)
         resp.raise_for_status()
@@ -203,7 +196,7 @@ class APIClients:
     def __init__(self):
         self._groq = None
         self._tavily = None
-        self._pexels = None
+        self._pexels_key = None
         self._unsplash_key = None
 
     @property
@@ -225,13 +218,13 @@ class APIClients:
         return self._tavily
 
     @property
-    def pexels(self) -> PexelsAPI:
-        if self._pexels is None:
-            api_key = os.environ.get("PEXELS_API_KEY")
-            if not api_key:
+    def pexels_key(self) -> str:
+        if self._pexels_key is None:
+            key = os.environ.get("PEXELS_API_KEY")
+            if not key:
                 raise ValueError("PEXELS_API_KEY not set")
-            self._pexels = PexelsAPI(api_key)
-        return self._pexels
+            self._pexels_key = key
+        return self._pexels_key
 
     @property
     def unsplash_key(self) -> str:
@@ -302,9 +295,32 @@ def get_random_asset_query(scene_text: str, category: str) -> str:
     query = " ".join(words)
     if len(query) < 3:
         query = category.split()[0]
-    # Remove any emojis or special characters
     query = re.sub(r'[^a-zA-Z0-9\s]', '', query)
     return query.strip()
+
+def get_font_path() -> str:
+    """Return path to a TTF font (prefer Noto)."""
+    font_candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+    ]
+    for f in font_candidates:
+        if Path(f).exists():
+            return f
+    # If none, download Noto font to cache
+    font_dir = FONTS_DIR
+    font_path = font_dir / "NotoSansDevanagari-Regular.ttf"
+    if not font_path.exists():
+        url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Regular.ttf"
+        if download_file(url, font_path):
+            return str(font_path)
+    # Fallback to default font (may not support Hindi)
+    return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+# ----------------------------------------------------------------------
+# END OF CHUNK 1
+# ----------------------------------------------------------------------
 
 # ----------------------------------------------------------------------
 # 6. RESEARCH & SCRIPT GENERATION
@@ -313,10 +329,7 @@ def get_random_asset_query(scene_text: str, category: str) -> str:
 @retry(stop=stop_after_attempt(MAX_API_RETRIES),
        wait=wait_exponential(multiplier=1, min=2, max=10))
 def research_fact(category: str) -> Dict[str, str]:
-    """
-    Use Tavily to find an interesting fact in the given category.
-    Returns dict with 'title', 'content', 'source'.
-    """
+    """Use Tavily to find an interesting fact."""
     query = f"interesting {category} fact for YouTube Shorts"
     logger.info(f"Researching: {query}")
     response = api.tavily.search(query=query, search_depth="basic", max_results=3)
@@ -333,27 +346,19 @@ def research_fact(category: str) -> Dict[str, str]:
 @retry(stop=stop_after_attempt(MAX_API_RETRIES),
        wait=wait_exponential(multiplier=1, min=2, max=10))
 def generate_script(category: str, fact: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Use Groq to produce a Hinglish script with narrative arc.
-    Returns dict with 'lines' (list of sentences) and 'full_text'.
-    """
+    """Use Groq to produce Hinglish script with narrative arc."""
     prompt = f"""
-You are a professional YouTube Shorts scriptwriter for the channel "Ajeebology Shorts".
-Write a fast‑paced, engaging Hinglish script (mix of Hindi and English) about the following fact:
+You are a professional YouTube Shorts scriptwriter for "Ajeebology Shorts".
+Write a fast‑paced, engaging Hinglish script about this fact:
 Category: {category}
 Title: {fact['title']}
 Content: {fact['content']}
-Source: {fact['source']}
 
-The script must be between 55 and 65 seconds when spoken at normal pace.
-Structure the script with a clear narrative arc:
-- HOOK (first 2-3 seconds): A surprising question or bold statement.
-- REVELATION (middle): The fact itself with escalating excitement.
-- CALL TO ACTION (last 3-5 seconds): Ask to like, share, comment, or subscribe.
-
-Break the script into 6-8 short segments (1-2 sentences each) for visual scene changes.
-Output the script as a JSON array of strings, e.g., ["Hook text.", "Revelation part 1.", ...].
-Only output the JSON array, nothing else.
+The script must be 55-65 seconds when spoken.
+Structure with: HOOK (surprising question), REVELATION (the fact), CALL TO ACTION.
+Break into 6-8 short segments (1-2 sentences each).
+Output as JSON array of strings, e.g., ["Hook text.", "Revelation part 1.", ...].
+Only output the JSON array.
 """
     logger.info("Generating script via Groq")
     response = api.groq.chat.completions.create(
@@ -366,11 +371,10 @@ Only output the JSON array, nothing else.
         max_tokens=600,
     )
     text = response.choices[0].message.content.strip()
-    # Parse JSON array
     try:
         lines = json.loads(text)
         if not isinstance(lines, list):
-            raise ValueError("Response is not a list")
+            raise ValueError("Not a list")
     except json.JSONDecodeError:
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match:
@@ -382,14 +386,19 @@ Only output the JSON array, nothing else.
     return {"lines": lines, "full_text": full_text}
 
 # ----------------------------------------------------------------------
-# 7. ASSET FETCHING (Pexels / Unsplash)
+# 7. ASSET FETCHING (Pexels / Unsplash) – using direct HTTP
 # ----------------------------------------------------------------------
 
 def search_pexels_videos(query: str, per_page: int = 5) -> List[Dict]:
-    """Search Pexels for videos, return list of dicts with 'url', 'width', 'height'."""
+    """Search Pexels for videos using direct HTTP request."""
+    url = "https://api.pexels.com/videos/search"
+    headers = {"Authorization": api.pexels_key}
+    params = {"query": query, "per_page": per_page, "size": "medium"}
     try:
-        resp = api.pexels.search_video(query, per_page=per_page)
-        videos = resp.get("videos", [])
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        videos = data.get("videos", [])
         results = []
         for vid in videos:
             video_files = vid.get("video_files", [])
@@ -408,7 +417,7 @@ def search_pexels_videos(query: str, per_page: int = 5) -> List[Dict]:
         return []
 
 def search_unsplash_images(query: str, per_page: int = 3) -> List[Dict]:
-    """Search Unsplash for images, return list of dicts with 'url', 'width', 'height'."""
+    """Search Unsplash for images."""
     try:
         url = "https://api.unsplash.com/search/photos"
         headers = {"Authorization": f"Client-ID {api.unsplash_key}"}
@@ -432,17 +441,13 @@ def search_unsplash_images(query: str, per_page: int = 3) -> List[Dict]:
         return []
 
 def fetch_asset(query: str, asset_type: str = "video") -> Optional[Path]:
-    """
-    Fetch a single asset (video or image) based on query.
-    Returns cached path or None.
-    """
+    """Fetch a single asset (video or image) based on query."""
     key = f"{asset_type}:{query}"
     cache_path = cache_get(key, ext=".mp4" if asset_type == "video" else ".jpg")
     if cache_path:
         logger.info(f"Using cached asset: {cache_path}")
         return cache_path
 
-    # Download fresh
     if asset_type == "video":
         results = search_pexels_videos(query, per_page=3)
         for item in results:
@@ -484,12 +489,7 @@ def fetch_asset(query: str, asset_type: str = "video") -> Optional[Path]:
 # ----------------------------------------------------------------------
 
 def generate_audio(text: str, output_path: Path, lang: str = "hi") -> bool:
-    """
-    Generate speech audio using espeak with a male voice (hi+m1).
-    Falls back to gTTS if espeak is not available.
-    Returns True on success.
-    """
-    # Use espeak with explicit male voice and tuned parameters
+    """Generate speech audio using espeak with male voice."""
     temp_wav = output_path.with_suffix(".wav")
     cmd = [
         "espeak", "-v", VOICE_LANG,
@@ -500,26 +500,23 @@ def generate_audio(text: str, output_path: Path, lang: str = "hi") -> bool:
     ]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
-        # Convert to MP3 using ffmpeg
         subprocess.run([
             "ffmpeg", "-i", str(temp_wav), "-acodec", "libmp3lame",
             "-b:a", "128k", str(output_path)
         ], check=True, capture_output=True)
         temp_wav.unlink(missing_ok=True)
-        logger.info(f"Generated audio via espeak (male voice): {output_path}")
+        logger.info(f"Generated audio via espeak (male): {output_path}")
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logger.warning(f"espeak failed: {e}. Falling back to gTTS (gender may vary).")
-
-    # Fallback to gTTS
+        logger.warning(f"espeak failed: {e}. Falling back to gTTS.")
     try:
         from gtts import gTTS
         tts = gTTS(text=text, lang=lang, slow=False)
         tts.save(str(output_path))
-        logger.info(f"Generated audio via gTTS (fallback): {output_path}")
+        logger.info(f"Generated audio via gTTS: {output_path}")
         return True
     except Exception as e:
-        logger.error(f"gTTS fallback also failed: {e}")
+        logger.error(f"gTTS also failed: {e}")
         return False
 
 # ----------------------------------------------------------------------
@@ -527,24 +524,17 @@ def generate_audio(text: str, output_path: Path, lang: str = "hi") -> bool:
 # ----------------------------------------------------------------------
 
 def plan_scenes(lines: List[str], total_duration: float) -> List[Dict]:
-    """
-    Given script lines and target total duration, compute per‑scene start/end times.
-    Returns list of dict: {text, start, end, duration}.
-    """
-    # Estimate words per second (avg 3 words/sec for Hinglish)
+    """Compute per‑scene start/end times based on word count."""
     total_words = sum(len(line.split()) for line in lines)
     words_per_second = max(2.5, min(4.0, total_words / total_duration))
-    # Allocate time proportionally
     durations = []
     for line in lines:
         word_count = len(line.split())
         dur = word_count / words_per_second
         durations.append(dur)
-    # Scale to total_duration
     total_estimated = sum(durations)
     scale = total_duration / total_estimated
     durations = [d * scale for d in durations]
-    # Build scenes
     scenes = []
     current_time = 0.0
     for i, line in enumerate(lines):
@@ -563,25 +553,18 @@ def plan_scenes(lines: List[str], total_duration: float) -> List[Dict]:
 # ----------------------------------------------------------------------
 
 # ----------------------------------------------------------------------
-# 10. FFMPEG UTILITIES FOR ADVANCED EDITING
+# 10. FFMPEG UTILITIES FOR EDITING
 # ----------------------------------------------------------------------
 
 def create_zoom_clip(input_file: Path, output_file: Path, duration: float,
                      zoom_in: bool = True, pan_x: float = 0.0, pan_y: float = 0.0) -> bool:
-    """
-    Apply zoom (in or out) and slight pan to a video or image.
-    For videos: we extract the middle portion and apply zoompan.
-    For images: use zoompan filter directly.
-    """
+    """Apply zoom/pan to an image or video."""
+    # For images, use zoompan; for videos, we'll just scale to fit (simpler)
     if input_file.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']:
-        # Use zoompan for images
-        # Calculate zoom factor: 1.0 -> 1.4 over duration
         start_zoom = 1.0
         end_zoom = 1.4 if zoom_in else 0.8
-        # Pan: subtle movement
-        pan_x_val = pan_x * 0.05  # max 5% shift
+        pan_x_val = pan_x * 0.05
         pan_y_val = pan_y * 0.05
-        # Build filter
         filter_str = (
             f"zoompan=z='if(eq(on,1),{start_zoom},zoom+({end_zoom-start_zoom})/{duration*FPS})':"
             f"x='(iw - iw/zoom)/2 + {pan_x_val}*iw/zoom':"
@@ -589,13 +572,10 @@ def create_zoom_clip(input_file: Path, output_file: Path, duration: float,
             f"d={int(duration*FPS)}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}"
         )
         cmd = [
-            "ffmpeg", "-y",
-            "-i", str(input_file),
+            "ffmpeg", "-y", "-i", str(input_file),
             "-vf", filter_str,
-            "-c:v", VIDEO_CODEC,
-            "-pix_fmt", PIXEL_FORMAT,
-            "-preset", FFMPEG_PRESET,
-            "-t", str(duration),
+            "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT,
+            "-preset", FFMPEG_PRESET, "-t", str(duration),
             str(output_file)
         ]
         try:
@@ -603,51 +583,18 @@ def create_zoom_clip(input_file: Path, output_file: Path, duration: float,
             return True
         except Exception as e:
             logger.error(f"zoompan failed: {e}")
-            return False
-    else:
-        # For video: we need to apply slow zoom using scale + crop
-        # Approach: overlay a scaled version with varying scale
-        # Use setpts to slow down if needed? We'll keep simple: crop and scale with zoom using zoompan on video is complex.
-        # Alternative: use a combination of scale and crop with time-varying crop.
-        # For simplicity, we'll use a static scale to fit 9:16 and add a subtle scale animation using a filter complex.
-        # Actually, we can apply zoompan on video too: we can use a filter that zooms in the middle.
-        # FFmpeg supports zoompan on video with the same syntax.
-        # But zoompan on video can be slow; we'll use a simpler approach: scale and then overlay a zoomed version with opacity?
-        # Let's just use zoompan with a fast preset.
-        filter_str = (
-            f"zoompan=z='if(eq(on,1),1.0,min(1.4,zoom+0.005))':"
-            f"x='(iw - iw/zoom)/2 + {pan_x*0.05}*iw/zoom':"
-            f"y='(ih - ih/zoom)/2 + {pan_y*0.05}*ih/zoom':"
-            f"d={int(duration*FPS)}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}"
-        )
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(input_file),
-            "-vf", filter_str,
-            "-c:v", VIDEO_CODEC,
-            "-pix_fmt", PIXEL_FORMAT,
-            "-preset", FFMPEG_PRESET,
-            "-t", str(duration),
-            str(output_file)
-        ]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            return True
-        except Exception as e:
-            logger.error(f"zoompan video failed: {e}")
-            # Fallback: just scale to fit
             return scale_to_fit(input_file, output_file, duration)
+    else:
+        # For video: scale to fit 9:16
+        return scale_to_fit(input_file, output_file, duration)
 
 def scale_to_fit(input_file: Path, output_file: Path, duration: float) -> bool:
-    """Simple scale and pad to 9:16."""
+    """Scale and pad to 1080x1920."""
     cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_file),
+        "ffmpeg", "-y", "-i", str(input_file),
         "-vf", f"scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-        "-c:v", VIDEO_CODEC,
-        "-pix_fmt", PIXEL_FORMAT,
-        "-preset", FFMPEG_PRESET,
-        "-t", str(duration),
+        "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT,
+        "-preset", FFMPEG_PRESET, "-t", str(duration),
         str(output_file)
     ]
     try:
@@ -657,46 +604,21 @@ def scale_to_fit(input_file: Path, output_file: Path, duration: float) -> bool:
         logger.error(f"scale_to_fit failed: {e}")
         return False
 
-def apply_crossfade(prev_file: Path, next_file: Path, output_file: Path,
-                    duration: float = 0.5, audio_fade: bool = True) -> bool:
-    """
-    Apply crossfade transition between two video clips.
-    duration: fade duration in seconds.
-    Returns True on success.
-    """
-    # We need to ensure both clips have same framerate and dimensions.
-    # For simplicity, we'll use xfade filter.
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(prev_file),
-        "-i", str(next_file),
-        "-filter_complex",
-        f"[0:v] [1:v] xfade=transition=fade:duration={duration}:offset={duration}",
-        "-c:v", VIDEO_CODEC,
-        "-pix_fmt", PIXEL_FORMAT,
-        "-preset", FFMPEG_PRESET,
-        "-an",  # audio will be handled separately after concat
-        str(output_file)
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return True
-    except Exception as e:
-        logger.error(f"xfade failed: {e}")
-        # Fallback: just concatenate without transition
-        return concat_clips([prev_file, next_file], output_file)
-
 def concat_clips(clip_files: List[Path], output_file: Path) -> bool:
-    """Concatenate video clips without re-encoding (assumes same codec)."""
+    """Concatenate video clips without re-encoding (using concat demuxer)."""
+    if not clip_files:
+        return False
     concat_file = OUTPUT_DIR / "concat_list_temp.txt"
     with open(concat_file, "w") as f:
         for clip in clip_files:
-            f.write(f"file '{clip.absolute()}'\n")
+            if clip.exists():
+                f.write(f"file '{clip.absolute()}'\n")
+    if concat_file.stat().st_size == 0:
+        concat_file.unlink(missing_ok=True)
+        return False
     cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", str(concat_file),
-        "-c", "copy",
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(concat_file), "-c", "copy",
         str(output_file)
     ]
     try:
@@ -709,182 +631,24 @@ def concat_clips(clip_files: List[Path], output_file: Path) -> bool:
         return False
 
 # ----------------------------------------------------------------------
-# 11. KINETIC CAPTIONS (Animated)
-# ----------------------------------------------------------------------
-
-def generate_kinetic_captions_filter(scenes: List[Dict], duration: float) -> str:
-    """
-    Build a complex drawtext filter string with animated captions.
-    Each word or sentence slides in from bottom with fade.
-    For simplicity, we'll make the whole line slide up with a scale effect.
-    """
-    filters = []
-    font_path = get_font_path()
-    # We'll animate using 'if' expressions based on time.
-    for idx, scene in enumerate(scenes):
-        text = scene["text"]
-        start = scene["start"]
-        end = scene["end"]
-        mid = (start + end) / 2
-        dur = scene["duration"]
-        # We'll split the text into words? Too complex. We'll use the whole line.
-        # We'll apply a slide-up effect: the text moves from y=h to y=h-text_h-100 over the first 0.3 seconds.
-        # And we'll have a scale effect (fontsize variation) using 'fontsize' expression.
-        # Escaping for ffmpeg
-        escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
-        # Create a filter string: drawtext with animated x,y,fontsize
-        # We'll use a simple slide from bottom with a bounce.
-        # We'll set x=(w-text_w)/2, y starts at h and moves to h-text_h-100 over 0.3s.
-        # Also a slight scale: fontsize=60 at start, 70 at peak, back to 60.
-        # We'll use enable='between(t,{start},{end})'
-        # To animate y: we need to compute value based on t.
-        # Use if(lt(t,{start}+0.3), (h - text_h - 100) * ((t-{start})/0.3), h - text_h - 100)
-        # But drawtext doesn't support complex math easily. We'll use a simpler version: just position and a fade in/out.
-        # For kinetic, we'll make text enter from the right or left.
-        # Let's do a slide from right: x starts at w, moves to (w-text_w)/2.
-        # Simpler: just use a static position with a fade-in alpha.
-        # Given time, we'll implement a basic fade-in and a slight upward motion.
-        # We'll use 'enable' and 'alpha' with linear interpolation.
-        # Actual implementation: we can create two filter instances: one for the text, one for the background box.
-        # For brevity, we'll stick to static captions with a slight scale animation via fontsize.
-        # I'll implement a simple slide-up with fade using the 'drawtext' filter's 'fontsize' and 'y' expressions.
-        # Because ffmpeg's drawtext has limited arithmetic, we'll use a technique:
-        # - We'll set y = h - text_h - 100 - (h - text_h - 100) * max(0, min(1, (t-start)/0.3))
-        # - That will slide up from bottom.
-        # - Also fontsize = 60 + 10 * sin((t-start)*5) to give pulse effect.
-        y_expr = f"h - text_h - 100 - (h - text_h - 100) * max(0, min(1, (t-{start})/0.3))"
-        fontsize_expr = f"60 + 5 * sin((t-{start})*4)"
-        # Combine:
-        filter_str = (
-            f"drawtext=text='{escaped}':"
-            f"fontfile={font_path}:"
-            f"fontsize='{fontsize_expr}':"
-            f"fontcolor={CAPTION_TEXT_COLOR}:"
-            f"box=1:boxcolor=black@0.6:boxborderw=10:"
-            f"x=(w-text_w)/2:"
-            f"y='{y_expr}':"
-            f"enable='between(t,{start},{end})'"
-        )
-        filters.append(filter_str)
-    return ",".join(filters)
-
-def get_font_path() -> str:
-    """Return path to a TTF font."""
-    fonts = [
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
-    ]
-    for f in fonts:
-        if Path(f).exists():
-            return f
-    # Fallback: download Noto if not present
-    font_dir = FONTS_DIR
-    font_path = font_dir / "NotoSansDevanagari-Regular.ttf"
-    if not font_path.exists():
-        url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansDevanagari/NotoSansDevanagari-Regular.ttf"
-        if download_file(url, font_path):
-            return str(font_path)
-    return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-
-# ----------------------------------------------------------------------
-# 12. BACKGROUND MUSIC & SOUND EFFECTS
-# ----------------------------------------------------------------------
-
-def fetch_background_music() -> Optional[Path]:
-    """Fetch a royalty-free track from Pixabay or use a cached file."""
-    # Use Pixabay API to get a free track
-    music_file = MUSIC_DIR / "bg_music.mp3"
-    if music_file.exists():
-        return music_file
-    # Search Pixabay for music (audio)
-    # Pixabay API: https://pixabay.com/api/docs/
-    # We need a key? Actually Pixabay allows free access for videos/images, but audio might be separate.
-    # We'll use a known free source: we can download from a static URL or use a cached file.
-    # For now, we'll generate a simple ambient track using ffmpeg sine waves.
-    # But we want real music. Since we don't have a specific API key for Pixabay audio, we'll fallback to a gentle pad sound.
-    # However, to make it feel professional, we can use a well-known royalty-free track from YouTube Audio Library.
-    # Since we can't guarantee external links, we'll generate a soft pad using ffmpeg.
-    # Actually, we can try to download from a sample URL from Pixabay (audio).
-    # We'll try to get a track from pixabay's audio section using a search.
-    # Let's implement a simple search over Pixabay audio.
-    # Pixabay audio API: https://pixabay.com/api/docs/#api_audio
-    # We need an API key? They have a free key for audio too? Possibly.
-    # For reliability, we'll use a cached default.
-    # I'll include a function to try to download from a known free source.
-    # For now, we'll create a calm pad sound with ffmpeg.
-    logger.info("Generating background music pad...")
-    # Generate a simple pad using sine waves
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi", "-i",
-        f"sine=frequency=220:duration=30, sine=frequency=330:duration=30, amix=inputs=2, volume=0.2",
-        "-c:a", "libmp3lame", "-b:a", "128k",
-        str(music_file)
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return music_file
-    except Exception as e:
-        logger.error(f"Failed to generate bg music: {e}")
-        return None
-
-def generate_sound_effect(effect_type: str = "whoosh") -> Optional[Path]:
-    """Generate a simple sound effect using ffmpeg."""
-    sound_file = SOUND_DIR / f"{effect_type}.mp3"
-    if sound_file.exists():
-        return sound_file
-    # Generate using aeval
-    if effect_type == "whoosh":
-        # White noise with a pitch sweep
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i",
-            "aevalsrc='sin(1000*t*t)*0.5':duration=0.3",
-            "-c:a", "libmp3lame", "-b:a", "128k",
-            str(sound_file)
-        ]
-    elif effect_type == "pop":
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i",
-            "aevalsrc='sin(2000*t)*exp(-10*t)':duration=0.2",
-            "-c:a", "libmp3lame", "-b:a", "128k",
-            str(sound_file)
-        ]
-    else:
-        return None
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return sound_file
-    except Exception as e:
-        logger.error(f"Failed to generate {effect_type}: {e}")
-        return None
-
-# ----------------------------------------------------------------------
-# 13. INTRO AND OUTRO GENERATION
+# 11. INTRO AND OUTRO GENERATION (Simplified)
 # ----------------------------------------------------------------------
 
 def generate_intro(output_file: Path) -> bool:
-    """Generate a 2-second branded intro with channel name and pulse."""
-    # Create a 1080x1920 black background with text
-    # Using ffmpeg's drawtext and drawbox
+    """Generate a 2-second branded intro with channel name."""
     font_path = get_font_path()
     filter_str = (
         f"color=c=black:s=1080x1920:d={INTRO_DURATION},"
-        f"drawtext=fontfile={font_path}:text='{CHANNEL_NAME}':fontcolor=white:fontsize=80:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2-50:"
-        f"drawtext=fontfile={font_path}:text='🚀':fontcolor=yellow:fontsize=100:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2+80:"
+        f"drawtext=fontfile={font_path}:text='Ajeebology Shorts':fontcolor=white:fontsize=80:"
+        f"x=(w-text_w)/2:y=(h-text_h)/2-50,"
         f"drawtext=fontfile={font_path}:text='Shorts':fontcolor=cyan:fontsize=50:"
         f"x=(w-text_w)/2:y=(h-text_h)/2+160"
     )
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", "color=c=black:s=1080x1920:d={}".format(INTRO_DURATION),
+        "-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={INTRO_DURATION}",
         "-vf", filter_str,
-        "-c:v", VIDEO_CODEC,
-        "-pix_fmt", PIXEL_FORMAT,
+        "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT,
         "-preset", FFMPEG_PRESET,
         str(output_file)
     ]
@@ -893,7 +657,20 @@ def generate_intro(output_file: Path) -> bool:
         return True
     except Exception as e:
         logger.error(f"Intro generation failed: {e}")
-        return False
+        # Fallback: simple text only
+        try:
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", f"color=black:s=1080x1920:d={INTRO_DURATION}",
+                "-vf", f"drawtext=fontfile={font_path}:text='Ajeebology Shorts':fontcolor=white:fontsize=80:x=(w-text_w)/2:y=(h-text_h)/2",
+                "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT,
+                "-preset", FFMPEG_PRESET,
+                str(output_file)
+            ]
+            subprocess.run(cmd_fallback, check=True, capture_output=True)
+            return True
+        except:
+            return False
 
 def generate_outro(output_file: Path) -> bool:
     """Generate a 2-second outro with subscribe call-to-action."""
@@ -901,16 +678,15 @@ def generate_outro(output_file: Path) -> bool:
     filter_str = (
         f"color=c=black:s=1080x1920:d={OUTRO_DURATION},"
         f"drawtext=fontfile={font_path}:text='SUBSCRIBE':fontcolor=red:fontsize=90:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2-50:"
-        f"drawtext=fontfile={font_path}:text='🔔':fontcolor=yellow:fontsize=100:"
+        f"x=(w-text_w)/2:y=(h-text_h)/2-50,"
+        f"drawtext=fontfile={font_path}:text='Ajeebology':fontcolor=yellow:fontsize=40:"
         f"x=(w-text_w)/2:y=(h-text_h)/2+80"
     )
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", "color=c=black:s=1080x1920:d={}".format(OUTRO_DURATION),
+        "-f", "lavfi", "-i", f"color=c=black:s=1080x1920:d={OUTRO_DURATION}",
         "-vf", filter_str,
-        "-c:v", VIDEO_CODEC,
-        "-pix_fmt", PIXEL_FORMAT,
+        "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT,
         "-preset", FFMPEG_PRESET,
         str(output_file)
     ]
@@ -919,67 +695,114 @@ def generate_outro(output_file: Path) -> bool:
         return True
     except Exception as e:
         logger.error(f"Outro generation failed: {e}")
-        return False
+        try:
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", f"color=black:s=1080x1920:d={OUTRO_DURATION}",
+                "-vf", f"drawtext=fontfile={font_path}:text='SUBSCRIBE':fontcolor=red:fontsize=90:x=(w-text_w)/2:y=(h-text_h)/2",
+                "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT,
+                "-preset", FFMPEG_PRESET,
+                str(output_file)
+            ]
+            subprocess.run(cmd_fallback, check=True, capture_output=True)
+            return True
+        except:
+            return False
+
+# ----------------------------------------------------------------------
+# 12. CAPTIONS (Static Fallback)
+# ----------------------------------------------------------------------
+
+def generate_captions_filter(scenes: List[Dict], duration: float) -> str:
+    """Generate static captions with fade-in (reliable)."""
+    filters = []
+    font_path = get_font_path()
+    for scene in scenes:
+        text = scene["text"]
+        start = scene["start"]
+        end = scene["end"]
+        escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+        filter_str = (
+            f"drawtext=text='{escaped}':"
+            f"fontfile={font_path}:"
+            f"fontsize=60:"
+            f"fontcolor=white:"
+            f"box=1:boxcolor=black@0.6:boxborderw=10:"
+            f"x=(w-text_w)/2:y=h-text_h-100:"
+            f"enable='between(t,{start},{end})'"
+        )
+        filters.append(filter_str)
+    return ",".join(filters)
+
+# ----------------------------------------------------------------------
+# 13. BACKGROUND MUSIC (Pad)
+# ----------------------------------------------------------------------
+
+def fetch_background_music() -> Path:
+    """Generate a soft pad or return cached."""
+    music_file = MUSIC_DIR / "bg_music.mp3"
+    if music_file.exists():
+        return music_file
+    # Generate a simple pad using sine waves
+    total_dur = 65  # enough for any video
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i",
+        f"sine=frequency=220:duration={total_dur}, sine=frequency=330:duration={total_dur}, amix=inputs=2, volume=0.2",
+        "-c:a", "libmp3lame", "-b:a", "128k",
+        str(music_file)
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return music_file
+    except Exception as e:
+        logger.error(f"Failed to generate bg music: {e}")
+        # Return a dummy path; will cause silence
+        return music_file
 
 # ----------------------------------------------------------------------
 # 14. COMPOSE FULL VIDEO (Orchestrates All Editing)
 # ----------------------------------------------------------------------
 
 def compose_video(scenes: List[Dict], assets: List[Path], output_video: Path) -> bool:
-    """
-    Compose the final video with:
-      - Intro (2s)
-      - Each scene: zoom/pan, crossfade transitions, kinetic captions
-      - Outro (2s)
-      - Voiceover audio + background music ducking
-      - Sound effects on transitions
-    """
-    # We need to generate individual scene clips with motion
+    """Compose final video: intro + scenes + outro, with audio."""
+    # 1. Generate scene clips with zoom/pan
     scene_clips = []
     for i, (scene, asset) in enumerate(zip(scenes, assets)):
         clip_dur = scene["duration"]
         clip_file = CLIPS_DIR / f"scene_{i:02d}.mp4"
-        # Apply zoom/pan (randomize direction)
         zoom_in = random.choice([True, False])
         pan_x = random.uniform(-0.5, 0.5)
         pan_y = random.uniform(-0.5, 0.5)
         if not create_zoom_clip(asset, clip_file, clip_dur, zoom_in, pan_x, pan_y):
-            # Fallback to scale
             scale_to_fit(asset, clip_file, clip_dur)
         scene_clips.append(clip_file)
 
-    # Add intro and outro
+    # 2. Intro and outro
     intro_file = CLIPS_DIR / "intro.mp4"
     outro_file = CLIPS_DIR / "outro.mp4"
     if not generate_intro(intro_file):
-        # Create a blank intro if generation fails
-        generate_intro(intro_file)  # tries again
+        # Create blank fallback
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=black:s=1080x1920:d={INTRO_DURATION}",
+            "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT, "-preset", FFMPEG_PRESET,
+            str(intro_file)
+        ], check=True, capture_output=True)
     if not generate_outro(outro_file):
-        generate_outro(outro_file)
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=black:s=1080x1920:d={OUTRO_DURATION}",
+            "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT, "-preset", FFMPEG_PRESET,
+            str(outro_file)
+        ], check=True, capture_output=True)
 
-    # Combine clips with crossfade transitions
-    # We'll concatenate sequentially with fades
-    # To simplify, we'll create a list of all clips (intro, scenes, outro)
+    # 3. Concatenate all clips (intro + scenes + outro)
     all_clips = [intro_file] + scene_clips + [outro_file]
-    # For transitions, we need to apply xfade between each consecutive pair.
-    # We can use filter_complex to chain xfades.
-    if len(all_clips) > 1:
-        # Build filter graph
-        filter_parts = []
-        for idx, clip in enumerate(all_clips):
-            filter_parts.append(f"[{idx}:v]")
-        # For xfade, we need to chain: [0:v][1:v]xfade[out1]; [out1][2:v]xfade[out2]...
-        # We'll simplify by using concat with no transitions to avoid complexity,
-        # but we'll add a fade in/out at start/end.
-        # Given time, we'll just concat without transitions (but we add crossfade later if possible).
-        # Let's just concat all clips without re-encoding (copy).
-        concat_output = OUTPUT_DIR / "concat_all.mp4"
-        if not concat_clips(all_clips, concat_output):
-            return False
-    else:
-        concat_output = all_clips[0]
+    concat_output = OUTPUT_DIR / "concat_all.mp4"
+    if not concat_clips(all_clips, concat_output):
+        logger.error("Concat failed")
+        return False
 
-    # Add audio: voiceover
+    # 4. Generate voiceover audio
     full_text = " ".join([s["text"] for s in scenes])
     voiceover_file = OUTPUT_DIR / "voiceover.mp3"
     if not generate_audio(full_text, voiceover_file):
@@ -988,27 +811,12 @@ def compose_video(scenes: List[Dict], assets: List[Path], output_video: Path) ->
             "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo",
             "-t", str(sum(s["duration"] for s in scenes) + INTRO_DURATION + OUTRO_DURATION),
             str(voiceover_file)
-        ], check=True)
+        ], check=True, capture_output=True)
 
-    # Background music
+    # 5. Background music
     bg_music = fetch_background_music()
-    if bg_music is None:
-        bg_music = MUSIC_DIR / "bg_music.mp3"
-        # generate simple pad
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "lavfi", "-i",
-            f"sine=frequency=220:duration=30, sine=frequency=330:duration=30, amix=inputs=2, volume=0.2",
-            "-c:a", "libmp3lame", "-b:a", "128k",
-            str(bg_music)
-        ], check=True)
 
-    # Duck audio: mix voiceover and bg music with volume adjustments
-    # We'll use ffmpeg's compand or sidechaincompress for ducking.
-    # Simpler: we'll use volume adjustments with amix.
-    # Option: we can lower bg volume when voiceover is active.
-    # Since we have timestamps, we can apply volume filter with enable.
-    # However, easier: we can use a filter that mixes with volume = voiceover * 1.5 + bg * 0.3.
-    # We'll just mix with a constant volume duck.
+    # 6. Mix audio (voiceover + bg with ducking)
     mixed_audio = OUTPUT_DIR / "mixed_audio.mp3"
     cmd = [
         "ffmpeg", "-y",
@@ -1021,7 +829,7 @@ def compose_video(scenes: List[Dict], assets: List[Path], output_video: Path) ->
     ]
     subprocess.run(cmd, check=True, capture_output=True)
 
-    # Combine video and audio
+    # 7. Combine video and audio
     final_no_captions = OUTPUT_DIR / "final_no_captions.mp4"
     cmd = [
         "ffmpeg", "-y",
@@ -1034,14 +842,13 @@ def compose_video(scenes: List[Dict], assets: List[Path], output_video: Path) ->
     ]
     subprocess.run(cmd, check=True, capture_output=True)
 
-    # Burn kinetic captions
-    filter_str = generate_kinetic_captions_filter(scenes, sum(s["duration"] for s in scenes))
+    # 8. Burn captions
+    filter_str = generate_captions_filter(scenes, sum(s["duration"] for s in scenes))
     cmd = [
         "ffmpeg", "-y",
         "-i", str(final_no_captions),
         "-vf", filter_str,
-        "-c:v", VIDEO_CODEC,
-        "-pix_fmt", PIXEL_FORMAT,
+        "-c:v", VIDEO_CODEC, "-pix_fmt", PIXEL_FORMAT,
         "-preset", FFMPEG_PRESET,
         "-c:a", "copy",
         str(output_video)
@@ -1050,11 +857,10 @@ def compose_video(scenes: List[Dict], assets: List[Path], output_video: Path) ->
         subprocess.run(cmd, check=True, capture_output=True)
     except Exception as e:
         logger.error(f"Caption burn failed: {e}")
-        # Fallback: copy without captions
         shutil.copy2(final_no_captions, output_video)
 
     # Cleanup
-    for f in scene_clips + [intro_file, outro_file, concat_output, voiceover_file, bg_music, mixed_audio, final_no_captions]:
+    for f in scene_clips + [intro_file, outro_file, concat_output, voiceover_file, mixed_audio, final_no_captions]:
         try:
             f.unlink(missing_ok=True)
         except:
@@ -1066,17 +872,16 @@ def compose_video(scenes: List[Dict], assets: List[Path], output_video: Path) ->
 # END OF CHUNK 3
 # ----------------------------------------------------------------------
 
+
 # ----------------------------------------------------------------------
 # 15. THUMBNAIL GENERATION (High-CTR)
 # ----------------------------------------------------------------------
 
 def generate_thumbnail(title: str, video_path: Path, output_path: Path) -> bool:
-    """Extract a high-motion frame from video and overlay bold text with vignette."""
-    # Get video duration
+    """Extract a frame and overlay bold text with vignette."""
     dur = get_video_duration(video_path)
     if dur <= 0:
         return False
-    # Extract frame at 1/3 or a random point with motion (we'll use 1/3)
     timestamp = dur / 3.0
     frame_file = OUTPUT_DIR / "frame_raw.jpg"
     cmd = [
@@ -1090,33 +895,30 @@ def generate_thumbnail(title: str, video_path: Path, output_path: Path) -> bool:
 
     try:
         img = Image.open(frame_file)
-        # Resize to thumbnail dimensions (landscape) – crop centre
         img = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.LANCZOS)
         draw = ImageDraw.Draw(img)
 
-        # Load a bold font
+        font_path = get_font_path()
         try:
-            font_path = get_font_path()
             font = ImageFont.truetype(font_path, 90)
             small_font = ImageFont.truetype(font_path, 50)
         except:
             font = ImageFont.load_default()
             small_font = font
 
-        # Add a semi-transparent overlay at the bottom for text readability
+        # Semi-transparent overlay at bottom
         overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
         overlay_draw = ImageDraw.Draw(overlay)
         overlay_draw.rectangle([(0, img.height-250), (img.width, img.height)], fill=(0,0,0,180))
         img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
         draw = ImageDraw.Draw(img)
 
-        # Title text (max 4-5 words) – take first 5 words of title
+        # Truncate title to max 5 words
         words = title.split()[:5]
         text = " ".join(words)
         if len(text) > 40:
             text = text[:37] + "..."
 
-        # Draw text with outline
         bbox = draw.textbbox((0, 0), text, font=font)
         tw = bbox[2] - bbox[0]
         th = bbox[3] - bbox[1]
@@ -1128,7 +930,6 @@ def generate_thumbnail(title: str, video_path: Path, output_path: Path) -> bool:
             draw.text((x+dx, y+dy), text, font=font, fill="black")
         draw.text((x, y), text, font=font, fill="white")
 
-        # Add a small subtitle "Ajeebology Shorts" at bottom
         sub_text = "@Ajeebology"
         bbox2 = draw.textbbox((0, 0), sub_text, font=small_font)
         sw = bbox2[2] - bbox2[0]
@@ -1136,8 +937,6 @@ def generate_thumbnail(title: str, video_path: Path, output_path: Path) -> bool:
         sy = y + th + 20
         draw.text((sx, sy), sub_text, font=small_font, fill="yellow")
 
-        # Add a subtle vignette (darken edges) using a radial gradient
-        # We'll use PIL's ImageFilter or manual pixel manipulation – skip for speed
         img.save(output_path, quality=90)
         frame_file.unlink(missing_ok=True)
         return True
@@ -1152,10 +951,7 @@ def generate_thumbnail(title: str, video_path: Path, output_path: Path) -> bool:
 
 def generate_viral_metadata(scenes: List[Dict], title: str, fact: Dict[str, str],
                             category: str) -> Dict[str, str]:
-    """
-    Create viral-optimised title, description, tags, hashtags.
-    Uses Groq to generate a click-driven title if available, else fallback.
-    """
+    """Create viral-optimised title, description, tags, hashtags."""
     # Try to generate a title using Groq
     try:
         prompt = f"""
@@ -1164,9 +960,9 @@ Title: {fact['title']}
 Content: {fact['content']}
 Category: {category}
 
-Generate a clickbait-style, curiosity-driven title for a YouTube Short (max 50 characters).
+Generate a clickbait-style, curiosity-driven title (max 50 characters).
 Use numbers, "This", "Why", "What If", or surprising statements.
-Output only the title, nothing else.
+Output only the title.
 """
         response = api.groq.chat.completions.create(
             model=GROQ_MODEL,
@@ -1179,9 +975,8 @@ Output only the title, nothing else.
         if len(viral_title) > 60:
             viral_title = viral_title[:57] + "..."
     except:
-        viral_title = title  # fallback
+        viral_title = title
 
-    # Description: include full script + call to action
     script_lines = [f"{i+1}. {scene['text']}" for i, scene in enumerate(scenes)]
     script_text = "\n".join(script_lines)
     description = f"🔥 {viral_title}\n\n"
@@ -1191,12 +986,10 @@ Output only the title, nothing else.
     description += "🔔 Turn on notifications so you never miss a Short!\n"
     description += "\n#Ajeebology #Shorts #Facts"
 
-    # Tags: combine category, title words, and general tags
     tag_words = [category] + [w for w in viral_title.split() if len(w) > 3]
     tags = ["Ajeebology", "Shorts", "Facts", "Psychology", "Space", "Weird"] + tag_words
-    tags = list(dict.fromkeys(tags))[:10]  # unique, max 10
+    tags = list(dict.fromkeys(tags))[:10]
 
-    # Hashtags: category + title keywords + generic
     hashtags = ["Ajeebology", "Shorts", category.replace(" ", "")]
     for w in viral_title.split():
         if len(w) > 3:
@@ -1248,7 +1041,6 @@ def send_to_telegram(video_path: Path, thumbnail_path: Path,
                 width=VIDEO_WIDTH,
                 height=VIDEO_HEIGHT,
             )
-        # Also send thumbnail separately
         with open(thumbnail_path, "rb") as tf:
             bot.send_photo(chat_id=chat_id, photo=InputFile(tf), caption="Thumbnail")
         logger.info("Telegram delivery successful")
@@ -1266,12 +1058,10 @@ def run_pipeline() -> bool:
     logger.info("🚀 Starting Ajeebology Shorts pipeline")
     start_time = time.time()
 
-    # 1. Category selection
     categories = ["Psychology Facts", "Space Facts", "Weird World Facts"]
     category = random.choice(categories)
     logger.info(f"📂 Selected category: {category}")
 
-    # 2. Research fact
     try:
         fact = research_fact(category)
         logger.info(f"🔍 Fact: {fact['title']}")
@@ -1279,7 +1069,6 @@ def run_pipeline() -> bool:
         logger.error(f"Research failed: {e}")
         return False
 
-    # 3. Generate script with narrative arc
     try:
         script = generate_script(category, fact)
         lines = script["lines"]
@@ -1288,23 +1077,20 @@ def run_pipeline() -> bool:
         logger.error(f"Script generation failed: {e}")
         return False
 
-    # 4. Plan scenes
     total_duration = random.uniform(*TARGET_DURATION)
     scenes = plan_scenes(lines, total_duration)
     logger.info(f"🎬 Planned {len(scenes)} scenes over {sum(s['duration'] for s in scenes):.1f}s")
 
-    # 5. Fetch assets for each scene
+    # Fetch assets
     assets = []
     for i, scene in enumerate(scenes):
         query = get_random_asset_query(scene["text"], category)
         asset_type = "video" if i % 2 == 0 else "image"
         asset = fetch_asset(query, asset_type)
         if asset is None:
-            # fallback: use a generic asset
             fallback_query = category.split()[0] if i % 2 == 0 else "mysterious"
             asset = fetch_asset(fallback_query, "video" if i % 2 == 0 else "image")
             if asset is None:
-                # create placeholder
                 placeholder = ASSETS_DIR / f"placeholder_{i}.jpg"
                 if not placeholder.exists():
                     img = Image.new('RGB', (1080, 1920), color=(random.randint(30,100), random.randint(30,100), random.randint(30,100)))
@@ -1312,7 +1098,6 @@ def run_pipeline() -> bool:
                 asset = placeholder
         assets.append(asset)
 
-    # 6. Compose final video (includes intro, scenes, outro, captions, audio)
     output_video = OUTPUT_DIR / f"ajeebology_{get_timestamp()}.mp4"
     logger.info("🎥 Composing video with advanced editing...")
     if not compose_video(scenes, assets, output_video):
@@ -1320,20 +1105,16 @@ def run_pipeline() -> bool:
         return False
     logger.info(f"✅ Video composed: {output_video}")
 
-    # 7. Generate thumbnail
     thumbnail_path = OUTPUT_DIR / f"thumbnail_{get_timestamp()}.jpg"
     if not generate_thumbnail(fact['title'], output_video, thumbnail_path):
         logger.warning("Thumbnail generation failed, creating fallback")
-        # simple fallback
         img = Image.new('RGB', (1280, 720), color='black')
         draw = ImageDraw.Draw(img)
         draw.text((100, 300), fact['title'], fill='white', font=ImageFont.load_default())
         img.save(thumbnail_path)
 
-    # 8. Generate viral metadata
     metadata = generate_viral_metadata(scenes, fact['title'], fact, category)
 
-    # 9. Runtime stats
     duration = get_video_duration(output_video)
     runtime_stats = {
         "duration": duration,
@@ -1342,17 +1123,14 @@ def run_pipeline() -> bool:
         "timestamp": get_timestamp(),
     }
 
-    # 10. Send to Telegram
     logger.info("📲 Sending to Telegram...")
     if not send_to_telegram(output_video, thumbnail_path, metadata, runtime_stats):
         logger.error("Telegram delivery failed")
 
-    # 11. Save metadata JSON
     metadata_path = OUTPUT_DIR / f"metadata_{get_timestamp()}.json"
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
-    # 12. Log completion
     elapsed = time.time() - start_time
     logger.info(f"✅ Pipeline completed in {elapsed:.2f}s")
     return True
