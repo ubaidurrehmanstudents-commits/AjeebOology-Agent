@@ -13,11 +13,12 @@ on:
           - space
           - weird_world
           - random
-      force_regenerate:
+     force_regenerate:
         description: 'Force regenerate even if cache exists'
         required: false
         default: false
         type: boolean
+        
   schedule:
     - cron: '0 8 * * *'
     - cron: '0 20 * * *'
