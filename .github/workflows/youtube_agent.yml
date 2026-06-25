@@ -7,7 +7,6 @@ on:
 
 env:
   PYTHON_VERSION: '3.10'
-  # Optional: silence Node 20 deprecation warning (if you wish)
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
@@ -24,8 +23,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-          # No cache-dependency-path – we'll let it auto-detect or skip
+          cache: false   # Disable automatic pip caching to avoid file check
 
       - name: Install system dependencies
         run: |
