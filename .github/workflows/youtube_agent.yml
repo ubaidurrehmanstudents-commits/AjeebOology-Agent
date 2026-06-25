@@ -35,9 +35,12 @@ jobs:
             fonts-dejavu-core \
             fonts-noto-cjk \
             fonts-noto-color-emoji \
-            espeak
+            espeak \
+            sox \
+            libsox-fmt-all
           ffmpeg -version
           espeak --version
+          sox --version
 
       - name: Install Python dependencies
         run: |
