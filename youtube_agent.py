@@ -834,23 +834,50 @@ def extract_all_segments(segments: list) -> list:
 
 def concatenate_segments(segment_paths: list, output_path: str):
     log.info("Concatenating video segments...")
-    list_file = FOOTAGE_DIR / "concat_list.txt"
-    with open(list_file, "w") as f:
-        for path in segment_paths:
-            if Path(path).exists():
-                f.write(f"file '{path}'\n")
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(list_file),
-        "-c", "copy",
+    valid_paths = [p for p in segment_paths if Path(p).exists()]
+    if not valid_paths:
+        raise RuntimeError("No valid segment paths found for concatenation")
+
+    log.info(f"Concatenating {len(valid_paths)} segments via filter_complex...")
+
+    cmd = ["ffmpeg", "-y"]
+    for path in valid_paths:
+        cmd += ["-i", path]
+
+    filter_parts = []
+    for i in range(len(valid_paths)):
+        filter_parts.append(
+            f"[{i}:v]scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
+            f"force_original_aspect_ratio=decrease,"
+            f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
+            f"(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1,fps={VIDEO_FPS}[v{i}]"
+        )
+
+    video_labels = "".join([f"[v{i}]" for i in range(len(valid_paths))])
+    filter_parts.append(
+        f"{video_labels}concat=n={len(valid_paths)}:v=1:a=0[vout]"
+    )
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd += [
+        "-filter_complex", filter_complex,
+        "-map", "[vout]",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "28",
+        "-an",
         output_path
     ]
-    result = subprocess.run(cmd, capture_output=True, timeout=180)
+
+    result = subprocess.run(cmd, capture_output=True, timeout=300)
     if result.returncode != 0:
-        raise RuntimeError(f"Concatenation failed: {result.stderr.decode()[:300]}")
+        err = result.stderr.decode()
+        log.error(f"Concatenation stderr: {err[:500]}")
+        raise RuntimeError(f"Concatenation failed: {err[:300]}")
+
     log.info(f"Segments concatenated: {output_path}")
 
 # ─────────────────────────────────────────────
