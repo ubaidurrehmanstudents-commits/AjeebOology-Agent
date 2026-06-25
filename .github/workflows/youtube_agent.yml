@@ -1,115 +1,96 @@
-name: Ajeebology Shorts Pipeline
+name: Ajeebology Shorts Production
 
 on:
   schedule:
-    - cron: '0 6 * * *'
-  workflow_dispatch:
-    inputs:
-      topic_override:
-        description: 'Optional topic override (leave empty for auto)'
-        required: false
-        default: ''
+    # Run daily at 07:00 UTC (adjust to your timezone)
+    - cron: '0 7 * * *'
+  workflow_dispatch:   # Manual trigger for testing
+
+env:
+  PYTHON_VERSION: '3.10'
+  FFMPEG_VERSION: '5.1.2'
 
 jobs:
-  generate-short:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    env:
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-      UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TOPIC_OVERRIDE: ${{ github.event.inputs.topic_override }}
-
+    timeout-minutes: 30
+    permissions:
+      contents: write          # to upload artifacts
     steps:
-
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
+          cache-dependency-path: '**/requirements.txt'
 
-      - name: Install System Dependencies
+      - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            ffmpeg \
-            imagemagick \
-            fonts-dejavu-core \
-            fonts-liberation \
-            wget \
-            curl \
-            bc
-          # Remove ImageMagick policy restrictions for video processing
-          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-6/policy.xml || true
-          sudo sed -i 's/<policy domain="path" rights="none" pattern="@\*"\/>/<policy domain="path" rights="read|write" pattern="@*"\/>/' /etc/ImageMagick-6/policy.xml || true
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg \
+            libavcodec-extra \
+            libfontconfig1 \
+            libfreetype6-dev \
+            ttf-dejavu-core \
+            fonts-noto-cjk \
+            fonts-noto-color-emoji
+          ffmpeg -version
 
-      - name: Install Python Dependencies
+      - name: Install Python dependencies
         run: |
-          pip install --upgrade pip --quiet
+          pip install --upgrade pip
           pip install \
             groq \
             tavily-python \
+            pexels-api \
+            unsplash-python \
             requests \
-            Pillow \
-            numpy \
-            gTTS \
-            pydub \
+            pillow \
             python-telegram-bot==20.7 \
-            aiohttp \
-            aiofiles \
-            tenacity \
-            colorlog \
+            openai-whisper \
+            pydub \
+            numpy \
             python-dotenv \
-            httpx \
-            tqdm
+            tenacity
+          # Optional: install ffmpeg-python if needed, but we'll use subprocess
 
-      - name: Verify FFmpeg Installation
-        run: |
-          ffmpeg -version | head -n 1
-          ffprobe -version | head -n 1
-          echo "FFmpeg verified successfully"
+      - name: Restore cached media assets
+        uses: actions/cache@v3
+        id: media-cache
+        with:
+          path: ./assets_cache
+          key: ${{ runner.os }}-media-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-media-
 
-      - name: Run Ajeebology Shorts Agent
-        id: run_agent
+      - name: Run the Shorts production pipeline
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CACHE_DIR: ./assets_cache
         run: |
           python youtube_agent.py
-        continue-on-error: false
 
-      - name: Upload Artifacts on Success
-        if: success()
+      - name: Upload generated video and metadata
         uses: actions/upload-artifact@v4
         with:
-          name: ajeebology-short-${{ github.run_number }}
+          name: shorts-output
           path: |
-            output/final_video.mp4
-            output/thumbnail.jpg
-            output/metadata.json
-            output/script.txt
+            output/*.mp4
+            output/*.png
+            output/*.json
           retention-days: 7
 
-      - name: Upload Artifacts on Failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ajeebology-debug-${{ github.run_number }}
-          path: |
-            output/
-            *.log
-          retention-days: 3
-
-      - name: Report Job Status
+      - name: Save cache after run
         if: always()
-        run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ Pipeline completed successfully - Run #${{ github.run_number }}"
-          else
-            echo "❌ Pipeline failed - Run #${{ github.run_number }}"
-            echo "Check debug artifacts for logs"
-          fi
+        uses: actions/cache/save@v3
+        with:
+          path: ./assets_cache
+          key: ${{ runner.os }}-media-${{ github.run_id }}
