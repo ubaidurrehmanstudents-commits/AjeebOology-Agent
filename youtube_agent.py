@@ -30,7 +30,7 @@ import numpy as np
 from groq import Groq
 from tavily import TavilyClient
 from pexels_api import API as PexelsAPI
-import unsplash
+# import unsplash
 
 # Telegram
 from telegram import Bot, InputFile
