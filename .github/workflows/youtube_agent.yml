@@ -1,78 +1,272 @@
-name: Ajeebology Shorts Generator
+name: Ajeebology Shorts — Automated Production Pipeline
 
 on:
+  # Manual trigger with topic selection
   workflow_dispatch:
     inputs:
       topic:
-        description: 'Psychology/Space/Weird fact topic'
+        description: 'Video topic category'
         required: true
-        type: string
-        default: 'Psychology fact about decision making'
-      duration:
-        description: 'Target duration in seconds'
+        default: 'psychology'
+        type: choice
+        options:
+          - psychology
+          - space
+          - weird_world
+          - random
+      force_regenerate:
+        description: 'Force regenerate even if cache exists'
         required: false
-        type: string
-        default: '60'
-
-concurrency:
-  group: ajeebology-${{ github.ref }}
-  cancel-in-progress: true
+        default: false
+        type: boolean
+  
+  # Automated schedule: 08:00 and 20:00 UTC daily
+  schedule:
+    - cron: '0 8 * * *'
+    - cron: '0 20 * * *'
 
 env:
-  PYTHONUNBUFFERED: 1
-  TARGET_WIDTH: 1080
-  TARGET_HEIGHT: 1920
-  TARGET_FPS: 30
-  TARGET_DURATION: ${{ inputs.duration }}
+  PYTHONUNBUFFERED: "1"
+  FORCE_COLOR: "1"
+  # API Keys injected from repository secrets
+  GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+  TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+  PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+  UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+  TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
-  generate-short:
+  produce_short:
+    name: Produce YouTube Short
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     
     steps:
+      # ─────────────────────────────────────────────
+      # STEP 1: Checkout repository
+      # ─────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
-
+      
+      # ─────────────────────────────────────────────
+      # STEP 2: Setup Python with pip caching
+      # ─────────────────────────────────────────────
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          # cache: 'pip'  <-- YE LINE HATA DI
-
-      - name: Install FFmpeg and fonts
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+      
+      # ─────────────────────────────────────────────
+      # STEP 3: Install system dependencies (FFmpeg + fonts)
+      # ─────────────────────────────────────────────
+      - name: Install FFmpeg and system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg fonts-liberation
-          ffmpeg -version | head -n1
-
+          sudo apt-get install -y -qq \
+            ffmpeg \
+            ffprobe \
+            fonts-noto-color-emoji \
+            fonts-noto-cjk \
+            fonts-dejavu-core \
+            imagemagick \
+            libmagickwand-dev \
+            sox \
+            libsox-fmt-mp3 \
+            curl \
+            jq \
+            2>&1 | tail -n 5
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+      
+      # ─────────────────────────────────────────────
+      # STEP 4: Install Python dependencies
+      # ─────────────────────────────────────────────
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip -q
-          pip install groq tavily-python requests pillow python-dotenv -q
-
-      - name: Run youtube_agent.py
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TOPIC: ${{ inputs.topic }}
-          TARGET_DURATION: ${{ env.TARGET_DURATION }}
+          pip install --upgrade pip setuptools wheel -q
+          pip install -r requirements.txt -q 2>&1 | tail -n 3
+      
+      # ─────────────────────────────────────────────
+      # STEP 5: Verify API connectivity (fail fast)
+      # ─────────────────────────────────────────────
+      - name: Pre-flight API checks
         run: |
-          python youtube_agent.py
-
-      - name: Upload artifacts
-        if: always()
+          python -c "
+          import os, sys, requests
+          errors = []
+          # Groq
+          try:
+              r = requests.get('https://api.groq.com/openai/v1/models', headers={'Authorization': 'Bearer ' + os.environ['GROQ_API_KEY']}, timeout=10)
+              if r.status_code != 200: errors.append(f'Groq: HTTP {r.status_code}')
+          except Exception as e: errors.append(f'Groq: {e}')
+          # Tavily
+          try:
+              r = requests.post('https://api.tavily.com/search', json={'api_key': os.environ['TAVILY_API_KEY'], 'query': 'test', 'max_results': 1}, timeout=10)
+              if r.status_code not in (200, 400, 422): errors.append(f'Tavily: HTTP {r.status_code}')
+          except Exception as e: errors.append(f'Tavily: {e}')
+          # Pexels
+          try:
+              r = requests.get('https://api.pexels.com/videos/search?query=test&per_page=1', headers={'Authorization': os.environ['PEXELS_API_KEY']}, timeout=10)
+              if r.status_code != 200: errors.append(f'Pexels: HTTP {r.status_code}')
+          except Exception as e: errors.append(f'Pexels: {e}')
+          # Unsplash
+          try:
+              r = requests.get('https://api.unsplash.com/search/photos?query=test&per_page=1', headers={'Authorization': 'Client-ID ' + os.environ['UNSPLASH_ACCESS_KEY']}, timeout=10)
+              if r.status_code != 200: errors.append(f'Unsplash: HTTP {r.status_code}')
+          except Exception as e: errors.append(f'Unsplash: {e}')
+          # Telegram
+          try:
+              r = requests.get(f'https://api.telegram.org/bot{os.environ[\"TELEGRAM_TOKEN\"]}/getMe', timeout=10)
+              if r.status_code != 200: errors.append(f'Telegram: HTTP {r.status_code}')
+          except Exception as e: errors.append(f'Telegram: {e}')
+          
+          if errors:
+              print('API CHECK FAILED:')
+              for e in errors: print(f'  - {e}')
+              sys.exit(1)
+          print('All API pre-flight checks passed.')
+          "
+      
+      # ─────────────────────────────────────────────
+      # STEP 6: Execute production pipeline
+      # ─────────────────────────────────────────────
+      - name: Run Ajeebology Shorts Pipeline
+        id: pipeline
+        run: |
+          mkdir -p output
+          python youtube_agent.py \
+            --topic "${{ github.event.inputs.topic || 'random' }}" \
+            --output-dir ./output \
+            --force "${{ github.event.inputs.force_regenerate || false }}" \
+            2>&1 | tee output/pipeline.log
+        continue-on-error: false
+      
+      # ─────────────────────────────────────────────
+      # STEP 7: Upload artifacts (video + thumbnail + metadata)
+      # ─────────────────────────────────────────────
+      - name: Upload production artifacts
         uses: actions/upload-artifact@v4
-        with:
-          name: ajeebology-output-${{ github.run_number }}
-          path: output/
-          retention-days: 7
-          compression-level: 6
-
-      - name: Cleanup temp
         if: always()
-        run: rm -rf /tmp/ajeebology_* || true
+        with:
+          name: ajeebology-short-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            output/*.mp4
+            output/*.jpg
+            output/*.png
+            output/*.json
+            output/*.txt
+            output/*.log
+          retention-days: 7
+          if-no-files-found: warn
+      
+      # ─────────────────────────────────────────────
+      # STEP 8: Verify outputs exist
+      # ─────────────────────────────────────────────
+      - name: Verify outputs
+        run: |
+          if [ ! -f output/video.mp4 ]; then
+            echo "::error::Video file not produced!"
+            exit 1
+          fi
+          if [ ! -f output/thumbnail.jpg ] && [ ! -f output/thumbnail.png ]; then
+            echo "::error::Thumbnail not produced!"
+            exit 1
+          fi
+          echo "Outputs verified successfully."
+          ls -lh output/
+      
+      # ─────────────────────────────────────────────
+      # STEP 9: Notify Telegram with full metadata
+      # ─────────────────────────────────────────────
+      - name: Send to Telegram
+        if: success()
+        run: |
+          python -c "
+          import os, json, requests
+          
+          output_dir = './output'
+          metadata_file = os.path.join(output_dir, 'metadata.json')
+          
+          with open(metadata_file, 'r', encoding='utf-8') as f:
+              meta = json.load(f)
+          
+          bot_token = os.environ['TELEGRAM_TOKEN']
+          chat_id = os.environ['TELEGRAM_CHAT_ID']
+          base_url = f'https://api.telegram.org/bot{bot_token}'
+          
+          # Build caption
+          caption = f'''📹 <b>{meta['title']}</b>
+          
+📝 <b>Description:</b>
+{meta['description']}
+
+🏷 <b>Tags:</b> {', '.join(meta['tags'])}
+#️⃣ <b>Hashtags:</b> {' '.join(meta['hashtags'])}
+📂 <b>Category:</b> {meta['category']}
+⏱ <b>Duration:</b> {meta['duration']}s
+📊 <b>File Size:</b> {meta.get('file_size_mb', 'N/A')} MB
+
+🔬 <b>Research Sources:</b>
+'''
+          for src in meta.get('sources', []):
+              caption += f\\\"• {src['title']}: {src['url']}\\n\\\"
+          
+          caption += f\\\"\\n📎 <b>Artifact:</b> Run #{os.environ.get('GITHUB_RUN_NUMBER', '?')}\\n\\\"
+          caption += f\\\"🕐 <b>Generated:</b> {meta.get('timestamp', 'N/A')}\\n\\\"
+          
+          # Send video with caption
+          video_path = os.path.join(output_dir, meta['video_filename'])
+          with open(video_path, 'rb') as vf:
+              files = {'video': vf}
+              data = {
+                  'chat_id': chat_id,
+                  'caption': caption[:1024],  # Telegram caption limit
+                  'parse_mode': 'HTML'
+              }
+              r = requests.post(f'{base_url}/sendVideo', data=data, files=files, timeout=120)
+              r.raise_for_status()
+              print(f'Video sent. Message ID: {r.json()[\"result\"][\"message_id\"]}')
+          
+          # Send thumbnail as document
+          thumb_path = os.path.join(output_dir, meta['thumbnail_filename'])
+          with open(thumb_path, 'rb') as tf:
+              files = {'document': tf}
+              data = {
+                  'chat_id': chat_id,
+                  'caption': f\\\"🖼 Thumbnail for: {meta['title']}\\\",
+                  'parse_mode': 'HTML'
+              }
+              r = requests.post(f'{base_url}/sendDocument', data=data, files=files, timeout=60)
+              r.raise_for_status()
+          
+          # Send metadata JSON
+          with open(metadata_file, 'rb') as mf:
+              files = {'document': mf}
+              data = {
+                  'chat_id': chat_id,
+                  'caption': '📋 Full metadata JSON',
+                  'parse_mode': 'HTML'
+              }
+              r = requests.post(f'{base_url}/sendDocument', data=data, files=files, timeout=30)
+              r.raise_for_status()
+          
+          print('Telegram delivery complete.')
+          "
+      
+      # ─────────────────────────────────────────────
+      # STEP 10: Cleanup (optional but good practice)
+      # ─────────────────────────────────────────────
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          rm -rf output/
+          sudo apt-get clean
+          pip cache purge 2>/dev/null || true
+          
