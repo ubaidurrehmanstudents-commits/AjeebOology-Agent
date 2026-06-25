@@ -13,12 +13,11 @@ on:
           - space
           - weird_world
           - random
-     force_regenerate:
+      force_regenerate:
         description: 'Force regenerate even if cache exists'
         required: false
         default: false
         type: boolean
-        
   schedule:
     - cron: '0 8 * * *'
     - cron: '0 20 * * *'
@@ -100,8 +99,7 @@ jobs:
         id: pipeline
         run: |
           mkdir -p output
-                    python youtube_agent.py --topic "${{ github.event.inputs.topic || 'random' }}" --output-dir ./output 2>&1 | tee output/pipeline.log
-                    
+          python youtube_agent.py --topic "${{ github.event.inputs.topic || 'random' }}" --output-dir ./output 2>&1 | tee output/pipeline.log
 
       - name: Upload production artifacts
         uses: actions/upload-artifact@v4
