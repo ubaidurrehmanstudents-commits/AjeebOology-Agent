@@ -118,10 +118,11 @@ def generate_script(category, research_context):
     
     response = groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile", # <-- NEW ACTIVE MODEL
         temperature=0.7,
         response_format={"type": "json_object"}
-    )
+        )
+
     
     script_data = json.loads(response.choices[0].message.content)
     logger.info(f"Script generated: {script_data['title']}")
