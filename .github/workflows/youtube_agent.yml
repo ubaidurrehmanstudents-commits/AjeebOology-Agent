@@ -34,10 +34,12 @@ jobs:
             libavcodec-extra \
             libfontconfig1 \
             libfreetype6-dev \
-            ttf-dejavu-core \
+            fonts-dejavu-core \
             fonts-noto-cjk \
-            fonts-noto-color-emoji
+            fonts-noto-color-emoji \
+            espeak
           ffmpeg -version
+          espeak --version
 
       - name: Install Python dependencies
         run: |
@@ -54,8 +56,9 @@ jobs:
             pydub \
             numpy \
             python-dotenv \
-            tenacity
-          # Optional: install ffmpeg-python if needed, but we'll use subprocess
+            tenacity \
+            gtts
+          # Note: gTTS is optional, we prefer espeak, but included for fallback
 
       - name: Restore cached media assets
         uses: actions/cache@v3
