@@ -1,151 +1,65 @@
-name: YouTube Shorts Agent
+name: Ajeebology Shorts Pipeline
 
 on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "Run mode"
-        required: true
-        default: "render"
-        type: choice
-        options:
-          - validate
-          - preview
-          - render
-      topic:
-        description: "Optional topic override"
-        required: false
-        type: string
-      language:
-        description: "Script language"
-        required: false
-        default: "hinglish"
-        type: choice
-        options:
-          - hinglish
-          - hindi
-          - english
+  schedule:
+    # Runs automatically every day at 12:00 PM UTC
+    - cron: '0 12 * * *' 
+  workflow_dispatch: # Allows you to trigger it manually via GitHub UI
 
 env:
-  PYTHON_VERSION: "3.11"
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PIP_NO_CACHE_DIR: "0"
-  PYTHONUNBUFFERED: "1"
-  FORCE_COLOR: "1"
+  # Required as per error prevention checklist
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
-  build:
-    name: Build Shorts
+  generate_short:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15 # Safeguard to prevent eating up free tier minutes
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Cache Assets Directory
+        uses: actions/cache@v4
+        with:
+          path: assets/
+          key: ${{ runner.os }}-assets-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-assets-
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.11'
+          # Deliberately omitting the cache line here as requested
 
-      - name: Install system dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            ffmpeg \
-            libavcodec-extra \
-            libfontconfig1 \
-            fonts-dejavu-core \
-            fonts-noto-cjk \
-            espeak \
-            sox \
-            libsox-fmt-all
+          sudo apt-get install -y ffmpeg libavcodec-extra libfontconfig1 fonts-dejavu-core fonts-noto-cjk espeak sox libsox-fmt-all
 
-      - name: Restore media cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/ajeebology
-            .cache
-            assets_cache
-          key: ${{ runner.os }}-ajeebology-${{ github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ajeebology-${{ github.ref_name }}-
-            ${{ runner.os }}-ajeebology-
-
-      - name: Install Python dependencies
+      - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            groq \
-            tavily-python \
-            requests \
-            pillow \
-            python-telegram-bot \
-            pydub \
-            numpy \
-            tenacity \
-            gtts
+          pip install groq tavily-python requests pillow python-telegram-bot pydub numpy tenacity gTTS
 
-      - name: Create runtime folders
-        run: |
-          mkdir -p outputs cache assets_cache logs
-
-      - name: Validate script
-        if: ${{ inputs.mode == 'validate' }}
+      - name: Execute YouTube Agent
         env:
+          # Injecting all required secrets into the execution environment
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RUN_MODE: validate
-          TOPIC_OVERRIDE: ${{ inputs.topic }}
-          LANGUAGE: ${{ inputs.language }}
         run: |
           python youtube_agent.py
 
-      - name: Preview script
-        if: ${{ inputs.mode == 'preview' }}
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RUN_MODE: preview
-          TOPIC_OVERRIDE: ${{ inputs.topic }}
-          LANGUAGE: ${{ inputs.language }}
-        run: |
-          python youtube_agent.py
-
-      - name: Render short
-        if: ${{ inputs.mode == 'render' }}
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RUN_MODE: render
-          TOPIC_OVERRIDE: ${{ inputs.topic }}
-          LANGUAGE: ${{ inputs.language }}
-        run: |
-          python youtube_agent.py
-
-      - name: Upload artifacts
-        if: always()
+      - name: Upload Output Artifacts
         uses: actions/upload-artifact@v4
+        if: always() # Uploads even if the script fails so you can debug
         with:
-          name: ajeebology-shorts-artifacts
-          path: |
-            outputs/**
-            logs/**
-            cache/**
-            assets_cache/**
-          if-no-files-found: warn
+          name: Ajeebology_Output
+          path: output/
           retention-days: 7
+          
