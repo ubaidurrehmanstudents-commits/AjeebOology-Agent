@@ -7,6 +7,8 @@ on:
 
 env:
   PYTHON_VERSION: '3.10'
+  # Optional: silence Node 20 deprecation warning (if you wish)
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
   build:
@@ -23,7 +25,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
-          cache-dependency-path: '**/requirements.txt'
+          # No cache-dependency-path – we'll let it auto-detect or skip
 
       - name: Install system dependencies
         run: |
