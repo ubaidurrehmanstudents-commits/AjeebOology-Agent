@@ -24,6 +24,8 @@ from typing import List, Dict, Tuple, Optional
 from urllib.parse import quote_plus
 
 import requests
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageOps
+import numpy as np
 
 # =============================================================================
 # CONFIGURATION
