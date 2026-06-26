@@ -765,39 +765,15 @@ class AssetAgent:
         except Exception as e:
             print(f"[AssetAgent] Pollinations error: {e}")
         return False
-
     def fetch_background_music(self) -> Optional[str]:
-        """Download royalty-free background music from Pixabay."""
-        # Using specific high-energy, low-melody background tracks suitable for Shorts
-        music_urls = [
-            "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3", # Tech/Trap beat
-            "https://cdn.pixabay.com/download/audio/2022/03/15/audio_c8c8a73467.mp3", # Cinematic pulse
-            "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3", # Upbeat electronic
-            "https://cdn.pixabay.com/download/audio/2024/02/18/audio_06c7536080.mp3"  # Dark synthwave
-        ]
-        
-        dest = str(Config.ASSETS_DIR / "bg_music.mp3")
-        random.shuffle(music_urls)
-        for url in music_urls:
-            if download_file(url, dest, timeout=45):
-                return dest
+        """Download royalty-free background music (Pixabay links expired, using safe fallback)."""
+        # Returning None safely skips music mixing if we don't have a reliable URL,
+        # preventing 3x retry timeouts and 403 Forbidden crashes.
         return None
 
     def fetch_sfx(self, sfx_type: str) -> Optional[str]:
         """Download specific sound effects for retention editing."""
-        # Map SFX types to Pixabay CDN URLs
-        sfx_library = {
-            "whoosh": "https://cdn.pixabay.com/download/audio/2022/03/10/audio_8e9a3f1d3e.mp3",
-            "impact": "https://cdn.pixabay.com/download/audio/2022/03/15/audio_9b7f3e1d2a.mp3",
-            "pop": "https://cdn.pixabay.com/download/audio/2022/03/24/audio_c8c8a73467.mp3",
-            "ding": "https://cdn.pixabay.com/download/audio/2022/04/27/audio_1808fbf07a.mp3"
-        }
-        
-        url = sfx_library.get(sfx_type)
-        if url:
-            dest = str(Config.ASSETS_DIR / f"sfx_{sfx_type}.mp3")
-            if download_file(url, dest, timeout=20):
-                return dest
+        # Pixabay CDN links frequently expire (403 Forbidden). Disabled to prevent crashes.
         return None
 
 # =============================================================================
@@ -1225,9 +1201,9 @@ class VideoEngine:
         bar_x = 40
         
         # Progress bar background
-        filter_complex += f"drawbox=x={bar_x}:y={bar_y}:w={bar_w}:h=8:color={bg_color}:t=fill[{prev_label}_pb1];"
+        filter_complex += f"[{prev_label}]drawbox=x={bar_x}:y={bar_y}:w={bar_w}:h=8:color={bg_color}:t=fill[{prev_label}_pb1];"
         # Progress bar fill (width based on time)
-        filter_complex += f"drawbox=x={bar_x}:y={bar_y}:w='{bar_w}*t/{total_duration}':h=8:color={progress_color}:t=fill[{prev_label}_pb2];"
+        filter_complex += f"[{prev_label}_pb1]drawbox=x={bar_x}:y={bar_y}:w='{bar_w}*t/{total_duration}':h=8:color={progress_color}:t=fill[{prev_label}_pb2];"
         
         # Final CTA Text
         filter_complex += f"drawtext=fontfile='{font_path}':text='SUBSCRIBE KARO':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=H-145:enable='gte(t,{cta_start})'[v_out];"
@@ -1280,7 +1256,7 @@ class VideoEngine:
         if not bg_path:
             cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x0A0519:s={self.width}x{self.height}:d={duration}", "-i", audio_path, "-shortest", "-c:v", "libx264", "-c:a", "aac", output_path]
         else:
-            cmd = ["ffmpeg", "-y", "-loop", "1", "-i", bg_path, "-i", audio_path, "-t", str(duration), "-vf", f"scale={self.width}:{self.height}", "-shortest", "-c:v", "libx264", "-c:a", "aac", output_path]
+            cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", bg_path, "-i", audio_path, "-t", str(duration), "-vf", f"scale={self.width}:{self.height}", "-shortest", "-c:v", "libx264", "-c:a", "aac", output_path]
             
         rc, _, err = run_command(cmd, timeout=300)
         if rc == 0:
