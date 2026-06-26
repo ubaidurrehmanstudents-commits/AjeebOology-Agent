@@ -14,6 +14,8 @@ import asyncio
 import logging
 import subprocess
 import requests
+import edge_tts  # FIX: Added missing import
+from textwrap import wrap
 from io import BytesIO
 from groq import Groq
 from tavily import TavilyClient
@@ -104,7 +106,8 @@ def generate_script(research_text):
     try:
         response = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama3-70b-8192",
+            # FIX: Updated to Groq's newest supported model
+            model="llama-3.3-70b-versatile",
             response_format={"type": "json_object"},
             temperature=0.7
         )
@@ -136,17 +139,6 @@ def generate_script(research_text):
 async def generate_audio_and_timestamps(segments):
     logger.info("Generating audio via edge-tts with WordBoundary extraction...")
     all_word_boundaries = []
-    combined_audio_path = os.path.join(WORKSPACE, "raw_voiceover.mp3")
-    
-    # Clear file if exists
-    if os.path.exists(combined_audio_path):
-        os.remove(combined_audio_path)
-        
-    with open(combined_audio_path, "wb") as f:
-        pass # Create empty file
-
-    cmd = ["ffmpeg", "-y", "-f", "mp3", "-i", combined_audio_path, "-c", "copy", combined_audio_path]
-    # Actually, edge-tts stream writes directly. Let's do it properly.
     
     temp_files = []
     
@@ -157,7 +149,6 @@ async def generate_audio_and_timestamps(segments):
         
         communicate = edge_tts.Communicate(text, "hi-IN-MadhurNeural")
         seg_boundaries = []
-        seg_start_offset = 0
         
         with open(temp_path, "wb") as audio_file:
             async for chunk in communicate.stream():
@@ -174,8 +165,6 @@ async def generate_audio_and_timestamps(segments):
                         "seg_index": i
                     })
         
-        # Append to global boundaries with offset
-        # We'll calculate the exact offset after concatenating audio
         all_word_boundaries.append(seg_boundaries)
 
     # Concatenate audio files and get offsets
@@ -437,7 +426,6 @@ def generate_thumbnail(title):
         font = ImageFont.load_default()
         
     # Wrap text
-    from textwrap import wrap
     lines = wrap(title, width=20)
     y = 1400
     
@@ -508,7 +496,7 @@ async def main():
     
     # 4. Subtitles
     ass_path = generate_ass_subtitle(word_boundaries, total_dur_ms)
-   
+    
     # 5. Assets & Segment Processing
     seg_videos = []
     # Calculate proportional duration for each segment based on word count
@@ -534,8 +522,8 @@ async def main():
         asset_path, asset_type = fetch_broll(seg["search_query"], i)
         vid_path = process_segment_video(asset_path, asset_type, seg_durations[i], i)
         seg_videos.append(vid_path)
-
-# 6. Final Assembly
+        
+    # 6. Final Assembly
     final_video = concat_segments(seg_videos, audio_path, ass_path)
     
     # 7. Thumbnail
@@ -567,3 +555,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+        
+        
+        
+ 
