@@ -1283,7 +1283,7 @@ class TelegramAgent:
             
         print("[TelegramAgent] Preparing delivery...")
         caption = self._build_caption(script, artifact_url, runtime_stats)
-        thumbnail_path = self._generate_thumbnail(script)
+        thumbnail_path = self._generate_thumbnail(script, broll_assets[0][0] if broll_assets else None)
         
         file_size = os.path.getsize(video_path)
         max_size = 48 * 1024 * 1024 # Telegram bot limit
@@ -1354,31 +1354,75 @@ class TelegramAgent:
         except Exception as e:
             print(f"[TelegramAgent] Text send error: {e}")
 
-    def _generate_thumbnail(self, script: VideoScript) -> Optional[str]:
-        """Generate high-quality YouTube thumbnail (1280x720)."""
+    def _generate_thumbnail(self, script: VideoScript, broll_path: Optional[str] = None) -> Optional[str]:
+        """Generate highly clickable, curiosity-inducing vertical thumbnail (1080x1920)."""
         try:
-            img = Image.new("RGB", (1280, 720), Config.COLOR_BG_DARK)
+            width, height = 1080, 1920
+            
+            # 1. Base Background (B-Roll or Gradient)
+            if broll_path and os.path.exists(broll_path):
+                try:
+                    bg_img = Image.open(broll_path).convert("RGB")
+                    # Crop to 9:16
+                    bg_img = ImageOps.fit(bg_img, (width, height), method=Image.Resampling.LANCZOS)
+                    # Heavy blur and darken so text pops
+                    bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=15))
+                    enhancer = ImageEnhance.Brightness(bg_img)
+                    bg_img = enhancer.enhance(0.35)
+                    img = bg_img
+                except:
+                    img = Image.new("RGB", (width, height), Config.COLOR_BG_DARK)
+                    draw = ImageDraw.Draw(img)
+                    for y in range(height):
+                        ratio = y / height
+                        r = int(10 + ratio * 30)
+                        g = int(5 + ratio * 20)
+                        b = int(25 + ratio * 50)
+                        draw.line([(0, y), (width, y)], fill=(r, g, b))
+            else:
+                img = Image.new("RGB", (width, height), Config.COLOR_BG_DARK)
+                draw = ImageDraw.Draw(img)
+                for y in range(height):
+                    ratio = y / height
+                    r = int(10 + ratio * 30)
+                    g = int(5 + ratio * 20)
+                    b = int(25 + ratio * 50)
+                    draw.line([(0, y), (width, y)], fill=(r, g, b))
+                    
             draw = ImageDraw.Draw(img)
             
-            # Gradient background
-            for y in range(720):
-                ratio = y / 720
-                r = int(10 + ratio * 30)
-                g = int(5 + ratio * 20)
-                b = int(25 + ratio * 50)
-                draw.line([(0, y), (1280, y)], fill=(r, g, b))
-                
-            font_title = self._load_font(Config.FONT_TITLE, 110)
-            font_body = self._load_font(Config.FONT_BODY, 50)
+            # 2. Massive Curiosity Emoji (Top Center)
+            emoji_map = {
+                "psychology": "🧠", 
+                "space": "👽", 
+                "weird_facts": "🤯"
+            }
+            emoji_str = emoji_map.get(script.category, "🔥")
             
-            # Wrap title
-            words = script.title.split()
+            # Try to load emoji font (falls back to text if not available)
+            try:
+                font_emoji = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", 350)
+                draw.text((width//2, 450), emoji_str, font=font_emoji, fill="white", anchor="mm")
+            except:
+                # Fallback: Draw a big yellow circle
+                draw.ellipse([width//2 - 150, 300, width//2 + 150, 600], fill=(255, 255, 0), outline=(255,0,128), width=10)
+            
+            # 3. Curiosity Text (Shortened for impact)
+            # Remove punctuation and keep it punchy
+            short_title = script.title.replace("?", "").replace("!", "").replace(".", "")
+            if len(short_title) > 40:
+                short_title = short_title[:40] + "..."
+                
+            font_title = self._load_font(Config.FONT_TITLE, 140)
+            font_body = self._load_font(Config.FONT_BODY, 60)
+            
+            words = short_title.split()
             lines = []
             current = []
             for word in words:
                 test = " ".join(current + [word])
                 bbox = font_title.getbbox(test)
-                if bbox and bbox[2] > 1200:
+                if bbox and bbox[2] > 950:
                     lines.append(" ".join(current))
                     current = [word]
                 else:
@@ -1386,16 +1430,28 @@ class TelegramAgent:
             if current:
                 lines.append(" ".join(current))
                 
-            # Draw title with glow
-            y = 360 - len(lines) * 60
+            # Draw text with heavy black outline for maximum pop
+            y = 1000 - (len(lines) * 70)
             for line in lines:
-                for offset in range(8, 0, -2):
-                    draw.text((640+offset, y), line, font=font_title, fill=(0, 200, 200), anchor="mm")
-                    draw.text((640-offset, y), line, font=font_title, fill=(0, 200, 200), anchor="mm")
-                draw.text((640, y), line, font=font_title, fill=(255, 255, 255), anchor="mm")
-                y += 120
+                # Thick black outline
+                for dx in range(-6, 7, 2):
+                    for dy in range(-6, 7, 2):
+                        draw.text((540+dx, y+dy), line, font=font_title, fill=(0,0,0), anchor="mm")
+                # Main text (Yellow/White combo for curiosity)
+                draw.text((540, y), line, font=font_title, fill=(255, 255, 0), anchor="mm")
+                y += 160
                 
-            draw.text((640, 650), "@AjeebologyShorts", font=font_body, fill=Config.COLOR_ACCENT, anchor="mm")
+            # 4. Red Arrow pointing to text (Curiosity trigger)
+            try:
+                # Draw a thick red arrow
+                arrow_pts = [(150, 1100), (350, 1050), (350, 1150)]
+                draw.polygon(arrow_pts, fill=(255, 0, 0))
+                draw.rectangle([350, 1080, 450, 1120], fill=(255, 0, 0))
+            except:
+                pass
+                
+            # Watermark at the bottom
+            draw.text((540, 1750), "@AjeebologyShorts", font=font_body, fill=Config.COLOR_ACCENT, anchor="mm")
             
             path = str(Config.OUTPUT_DIR / "thumbnail.jpg")
             img.save(path, "JPEG", quality=90)
