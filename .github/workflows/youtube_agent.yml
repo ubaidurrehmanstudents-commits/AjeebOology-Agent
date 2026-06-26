@@ -1,57 +1,178 @@
-name: Ajeebology Shorts Automation
+name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
-    - cron: '45 8 * * *' # 8:45 AM UTC = 1:45 PM PKT
+    # Runs at 8:45 AM UTC (1:45 PM PKT) daily
+    - cron: '45 8 * * *'
   workflow_dispatch:
+    inputs:
+      category:
+        description: 'Force a specific category (psychology/space/weird_facts)'
+        required: false
+        default: ''
 
-permissions:
-  contents: read
-  actions: write
+# Prevent multiple concurrent runs from eating up free tier minutes
+concurrency:
+  group: ajeebology-shorts-pipeline
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  FORCE_COLOR: "1"
+  # Global directories to keep paths consistent
+  BASE_DIR: /tmp/ajeebology
+  FONTS_DIR: /tmp/ajeebology/fonts
 
 jobs:
   build-and-deliver:
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # Hard limit to protect free tier minutes
-
+    timeout-minutes: 30 # Strict timeout to prevent runaway minute consumption
+    
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python Environment
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install System Dependencies (FFmpeg & Fonts)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto fonts-noto-core fonts-noto-extra fonts-noto-ui-core fonts-dejavu-core
-
-      - name: Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install edge-tts requests groq tavily-python Pillow
-
-      - name: Execute Automation Pipeline
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python youtube_agent.py
-
-      - name: Upload Video Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ajeebology-short-${{ github.run_id }}
-          path: |
-            output_video.mp4
-            thumbnail.jpg
-            metadata.txt
-          retention-days: 3
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Cache Python dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-3.11-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-3.11-
+    
+    - name: Install system dependencies
+      run: |
+        echo "Installing system packages and FFmpeg..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+          ffmpeg \
+          libsm6 \
+          libxext6 \
+          libgl1 \
+          libfontconfig1 \
+          libxrender1 \
+          fonts-dejavu-core \
+          fonts-liberation \
+          fonts-freefont-ttf \
+          fonts-noto-core
+        ffmpeg -version | head -1
+        echo "System dependencies installed."
+    
+    - name: Download Premium Fonts
+      run: |
+        mkdir -p ${{ env.FONTS_DIR }}
+        echo "Downloading Montserrat and Bebas Neue fonts..."
+        # Montserrat Bold
+        wget -q -O ${{ env.FONTS_DIR }}/Montserrat-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf"
+        # Bebas Neue
+        wget -q -O ${{ env.FONTS_DIR }}/BebasNeue-Regular.ttf "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf"
+        # Roboto (Fallback)
+        wget -q -O ${{ env.FONTS_DIR }}/Roboto-Bold.ttf "https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf"
+        echo "Fonts downloaded to ${{ env.FONTS_DIR }}"
+        ls -lh ${{ env.FONTS_DIR }}
+    
+    - name: Install Python dependencies
+      run: |
+        echo "Installing Python packages..."
+        pip install --upgrade pip setuptools wheel
+        # Using faster-whisper instead of openai-whisper to save 10+ minutes of build time 
+        # and drastically reduce CPU inference time for word-level timestamps.
+        pip install \
+          requests \
+          Pillow \
+          numpy \
+          edge-tts \
+          faster-whisper \
+          imageio-ffmpeg
+        echo "Python dependencies installed."
+    
+    - name: Cache downloaded assets (B-roll, Audio)
+      uses: actions/cache@v4
+      with:
+        path: /tmp/ajeebology/assets
+        key: ajeebology-assets-${{ github.run_id }}
+        restore-keys: |
+          ajeebology-assets-
+    
+    - name: Check Runner Disk Space
+      run: |
+        echo "Disk space check before pipeline execution:"
+        df -h /tmp
+        df -h /
+    
+    - name: Run Ajeebology Pipeline
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        CATEGORY_OVERRIDE: ${{ github.event.inputs.category }}
+      run: |
+        echo "Starting Ajeebology Shorts Pipeline..."
+        echo "Run ID: $GITHUB_RUN_ID"
+        echo "Repository: $GITHUB_REPOSITORY"
+        
+        mkdir -p output
+        
+        python youtube_agent.py
+        
+        echo "Pipeline execution finished. Copying outputs..."
+        
+        if [ -f /tmp/ajeebology/output/output_video.mp4 ]; then
+          cp /tmp/ajeebology/output/output_video.mp4 output/
+          echo "Video copied to output/"
+        else
+          echo "WARNING: output_video.mp4 not found!"
+        fi
+        
+        if [ -f /tmp/ajeebology/output/thumbnail.jpg ]; then
+          cp /tmp/ajeebology/output/thumbnail.jpg output/
+          echo "Thumbnail copied to output/"
+        fi
+        
+        ls -lh output/
+    
+    - name: Upload video artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ajeebology-video-${{ github.run_id }}
+        path: |
+          output/output_video.mp4
+          output/thumbnail.jpg
+        retention-days: 7
+        if-no-files-found: warn
+    
+    - name: Cleanup temporary files
+      if: always()
+      run: |
+        echo "Cleaning up temporary files to save disk space..."
+        rm -rf /tmp/ajeebology/frames
+        rm -rf /tmp/ajeebology/audio
+        du -sh /tmp/ajeebology/ 2>/dev/null || true
+        df -h /tmp
+    
+    - name: Notify on failure
+      if: failure()
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        echo "Pipeline failed. Sending notification to Telegram..."
+        curl -s -X POST \
+          "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+          -d "chat_id=${TELEGRAM_CHAT_ID}" \
+          -d "parse_mode=HTML" \
+          -d "text=<b>❌ Ajeebology Pipeline Failed</b>%0A%0ARun ID: ${{ github.run_id }}%0ARepository: ${{ github.repository }}%0A%0A<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>View Logs</a>" \
+          || true
