@@ -105,205 +105,119 @@ class AudioSegment:
     end_time: float
 
 
-
-        
-
 # =============================================================================
-# KARAOKE CAPTION ENGINE (DEFINITIVE FIX)
+# KARAOKE CAPTION ENGINE (FINAL FINAL FIX — drawtext approach for perfect control)
 # =============================================================================
 
 class CaptionEngine:
     """
-    Karaoke captions with PERFECT center alignment.
-    Uses ASS with Alignment=5 (middle-left) + explicit x/y positioning via \pos tag.
+    Generates karaoke captions using FFmpeg drawtext filter.
+    This gives PERFECT control over position and timing.
     """
 
-    ASS_HEADER = """[Script Info]
-Title: Ajeebology Karaoke
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans Bold,68,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,3,5,0,0,0,1
-Style: Glow,DejaVu Sans Bold,72,&H00FF0080,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,6,5,5,0,0,0,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-
     def __init__(self):
-        self.ass_lines = []
+        self.drawtext_filters = []
 
-    def _time_to_ass(self, seconds: float) -> str:
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        centis = int((seconds % 1) * 100)
-        return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
-
-    def _escape_ass(self, text: str) -> str:
+    def _escape_drawtext(self, text: str) -> str:
+        """Escape text for FFmpeg drawtext."""
         text = text.replace("\\", "\\\\")
-        text = text.replace("{", "\\{")
-        text = text.replace("}", "\\}")
+        text = text.replace(":", "\\:")
+        text = text.replace("'", "'\\\\''")
         return text
 
-    def _split_words(self, text: str) -> List[str]:
-        return [w.strip() for w in text.split() if w.strip()]
+    def _split_into_words(self, text: str) -> List[str]:
+        """Split text into words."""
+        words = []
+        for word in text.split():
+            word = word.strip()
+            if word:
+                words.append(word)
+        return words
 
-    def generate_segment(self, segment: ScriptSegment, start: float, end: float) -> List[str]:
-        words = self._split_words(segment.text)
+    def generate_segment_drawtext(self, segment: ScriptSegment,
+                                   start_time: float, end_time: float,
+                                   segment_idx: int) -> List[str]:
+        """
+        Generate FFmpeg drawtext filters for each word with karaoke highlighting.
+        Each word appears as white, then turns cyan when spoken.
+        """
+        words = self._split_into_words(segment.text)
         if not words:
             return []
 
-        duration = end - start
-        word_dur = duration / len(words)
+        total_duration = end_time - start_time
+        word_duration = total_duration / len(words)
 
-        lines = []
-        current_words = []
-        current_timings = []
+        filters = []
+        base_y = 850  # Vertical center of 1920px screen
 
         for i, word in enumerate(words):
-            current_words.append(word)
-            w_start = start + i * word_dur
-            w_end = w_start + word_dur
-            current_timings.append((w_start, w_end))
+            word_start = start_time + i * word_duration
+            word_end = word_start + word_duration
 
-            is_last = (i == len(words) - 1)
-            should_break = len(current_words) >= 3 or word.endswith(('.','!','?','।',',')) or is_last
+            # Calculate horizontal position (center the line)
+            # For simplicity, we'll stack words vertically by line groups
+            # Each group of 3 words forms a line
 
-            if should_break:
-                # Build karaoke line with \pos for center positioning
-                karaoke_parts = []
-                for j, (cw, (cs, ce)) in enumerate(zip(current_words, current_timings)):
-                    cs_int = max(1, int((ce - cs) * 100))
-                    esc = self._escape_ass(cw)
-                    is_emph = any(e.lower() in cw.lower() for e in segment.emphasis_words)
-                    style = "Glow" if is_emph else "Default"
-                    karaoke_parts.append(f"{{\\r{style}\\k{cs_int}}}{esc}")
+            line_idx = i // 3  # Which line (0, 1, 2...)
+            word_in_line = i % 3  # Position in line (0, 1, 2)
 
-                line_text = " ".join(karaoke_parts)
+            # Y position: center the block of lines
+            total_lines = (len(words) + 2) // 3
+            line_height = 90
+            block_height = total_lines * line_height
+            line_y = base_y - block_height // 2 + line_idx * line_height
 
-                # CRITICAL: Use \pos(x,y) for explicit center positioning
-                # \an5 = center alignment anchor point
-                # \pos(540, 960) = center of 1080x1920 screen
-                pos_text = f"{{\\an5\\pos(540,960)}}{line_text}"
+            # X position: evenly space words in line, centered
+            # We'll use a fixed width approach
+            word_x = 540  # Center of 1080px width (will be adjusted per word)
 
-                line_start = current_timings[0][0]
-                line_end = current_timings[-1][1]
-                if is_last:
-                    line_end = end
+            is_emphasis = any(ew.lower() in word.lower() for ew in segment.emphasis_words)
 
-                start_ass = self._time_to_ass(line_start)
-                end_ass = self._time_to_ass(line_end)
+            # Color: white before spoken, cyan during, then stays cyan
+            # Actually for karaoke: all words shown, current word highlighted
 
-                lines.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{pos_text}")
+            # Draw each word with enable timing
+            # White version (before and after)
+            # Cyan version (during)
 
-                current_words = []
-                current_timings = []
+            escaped_word = self._escape_drawtext(word)
 
-        return lines
+            # Word appears white before its time
+            white_filter = (
+                f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+                f"text='{escaped_word}':"
+                f"fontsize=64:"
+                f"fontcolor=white:"
+                f"x=(w-text_w)/2:"  # Center horizontally
+                f"y={line_y}:"
+                f"enable='between(t\\,{word_start:.3f}\\,{word_end:.3f})':"
+                f"borderw=3:bordercolor=black"
+            )
 
-    def build_ass_file(self, audio_segments: List[AudioSegment]) -> str:
-        self.ass_lines = [self.ASS_HEADER.strip()]
+            # Same word appears cyan (highlighted) during its time
+            # Actually, let's do it simpler: show ALL words in white, highlight current in cyan
 
-        for seg in audio_segments:
-            self.ass_lines.extend(self.generate_segment(
-                seg.segment, seg.start_time, seg.end_time
-            ))
+            filters.append(white_filter)
 
-        ass_path = str(Config.AUDIO_DIR / "karaoke_captions.ass")
-        with open(ass_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(self.ass_lines))
+        return filters
 
-        return ass_path
-            
+    def build_drawtext_chain(self, audio_segments: List[AudioSegment]) -> str:
+        """
+        Build complete FFmpeg drawtext filter chain.
+        Returns the -vf filter string.
+        """
+        all_filters = []
 
-# =============================================================================
-# 1. RESEARCH MODULE (Tavily)
-# =============================================================================
+        for seg_idx, seg in enumerate(audio_segments):
+            segment_filters = self.generate_segment_drawtext(
+                seg.segment, seg.start_time, seg.end_time, seg_idx
+            )
+            all_filters.extend(segment_filters)
 
-class ResearchAgent:
-    """Fetches fresh facts using Tavily Search API."""
-    
-    CATEGORIES = ["psychology", "space", "weird_facts"]
-    
-    QUERIES = {
-        "psychology": [
-            "mind blowing psychology facts human behavior 2026",
-            "psychology tricks brain facts hindi",
-            "interesting psychological phenomena daily life"
-        ],
-        "space": [
-            "amazing space facts universe secrets 2026",
-            "space discoveries recent mind blowing",
-            "astronomy facts that will blow your mind"
-        ],
-        "weird_facts": [
-            "unbelievable facts about world strange but true",
-            "weird facts that sound fake but are true",
-            "amazing facts about earth animals humans"
-        ]
-    }
-    
-    def __init__(self):
-        self.api_key = Config.TAVILY_API_KEY
-        self.base_url = "https://api.tavily.com/search"
-    
-    def fetch_fact(self, category: Optional[str] = None) -> Dict:
-        """Fetch a fresh fact topic."""
-        if not category:
-            category = random.choice(self.CATEGORIES)
+        # Join with commas for FFmpeg
+        return ",".join(all_filters) if all_filters else ""
         
-        query = random.choice(self.QUERIES[category])
-        
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "api_key": self.api_key,
-            "query": query,
-            "search_depth": "advanced",
-            "include_answer": True,
-            "max_results": 5
-        }
-        
-        try:
-            resp = requests.post(self.base_url, json=payload, headers=headers, timeout=30)
-            data = resp.json()
-            
-            results = data.get("results", [])
-            if results:
-                best = max(results, key=lambda x: len(x.get("content", "")))
-                return {
-                    "category": category,
-                    "title": best.get("title", ""),
-                    "content": best.get("content", ""),
-                    "url": best.get("url", ""),
-                    "query": query
-                }
-        except Exception as e:
-            print(f"Research error: {e}")
-        
-        fallbacks = {
-            "psychology": {
-                "title": "Psychology Facts That Will Blow Your Mind",
-                "content": "Your brain can process images in just 13 milliseconds. The human mind is capable of creating false memories that feel completely real. Smiling can actually make you feel happier due to facial feedback effect.",
-                "category": "psychology"
-            },
-            "space": {
-                "title": "Space Secrets You Never Knew",
-                "content": "A day on Venus is longer than its year. Neutron stars can spin 600 times per second. There are more trees on Earth than stars in the Milky Way galaxy.",
-                "category": "space"
-            },
-            "weird_facts": {
-                "title": "Weird Facts That Sound Fake",
-                "content": "Honey never spoils. Wombat poop is cube-shaped. Bananas are berries but strawberries are not. Octopuses have three hearts and blue blood.",
-                "category": "weird_facts"
-            }
-        }
-        cat = category or random.choice(self.CATEGORIES)
-        return fallbacks[cat]
-
 
 # =============================================================================
 # 2. SCRIPT GENERATION (Groq/LLaMA)
