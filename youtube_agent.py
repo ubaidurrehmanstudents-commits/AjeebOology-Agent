@@ -106,19 +106,20 @@ class AudioSegment:
 
 
 
+        
 # =============================================================================
-# KARAOKE CAPTION ENGINE (FIXED — Sync + Center Alignment)
+# KARAOKE CAPTION ENGINE (FINAL FIX — Correct Sync + True Center)
 # =============================================================================
 
 class CaptionEngine:
     """
-    Generates professional karaoke-style ASS subtitles.
-    Uses Whisper for PRECISE word timing + original Hinglish text for display.
-    Captions centered vertically on screen.
+    Generates karaoke-style ASS subtitles.
+    FIXED: Proper timing sync + true center alignment.
     """
-    
-    # FIXED: Alignment=10 (center horizontally + center vertically in ASS)
-    # MarginV=700 positions text in middle of 1920px height screen
+
+    # Alignment=10 = center horizontally, center vertically (ASS v4+)
+    # MarginV=850 pushes text to vertical center of 1920px screen
+    # Fontsize=68 for readability
     ASS_HEADER = """[Script Info]
 Title: Ajeebology Karaoke Captions
 ScriptType: v4.00+
@@ -129,231 +130,147 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans Bold,72,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,3,10,60,60,700,1
-Style: Highlight,DejaVu Sans Bold,72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,105,105,0,0,1,5,4,10,60,60,700,1
-Style: Glow,DejaVu Sans Bold,76,&H00FF0080,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,6,5,10,60,60,700,1
+Style: Default,DejaVu Sans Bold,68,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,3,10,40,40,850,1
+Style: Highlight,DejaVu Sans Bold,68,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,105,105,0,0,1,5,4,10,40,40,850,1
+Style: Glow,DejaVu Sans Bold,72,&H00FF0080,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,6,5,10,40,40,850,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    
+
     def __init__(self):
         self.ass_lines = []
-        self._whisper_model = None
-    
-    def _get_whisper_model(self):
-        """Lazy-load Whisper model."""
-        if self._whisper_model is None:
-            try:
-                import whisper
-                self._whisper_model = whisper.load_model("base")
-            except Exception as e:
-                print(f"Whisper model load error: {e}")
-                self._whisper_model = False
-        return self._whisper_model
-    
+
     def _time_to_ass(self, seconds: float) -> str:
+        """Convert seconds to ASS time format: H:MM:SS.cc"""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
         centis = int((seconds % 1) * 100)
         return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
-    
+
     def _escape_ass_text(self, text: str) -> str:
+        """Escape special ASS characters."""
         text = text.replace("\\", "\\\\")
         text = text.replace("{", "\\{")
         text = text.replace("}", "\\}")
         return text
-    
+
     def _split_into_words(self, text: str) -> List[str]:
+        """Split text into words preserving punctuation."""
         words = []
         for word in text.split():
             word = word.strip()
             if word:
                 words.append(word)
         return words
-    
-    def _generate_karaoke_line(self, words: List[str], timings: List[Tuple[float, float]], 
-                                emphasis_words: List[str]) -> str:
+
+    def _generate_karaoke_line(self, words: List[str], line_start: float,
+                                line_end: float, emphasis_words: List[str]) -> str:
         """
-        Generate karaoke line with PRECISE Whisper timings.
-        words: original Hinglish words
-        timings: list of (start, end) for each word from Whisper
+        Generate a single karaoke dialogue line with \k tags.
+        CRITICAL: line_start and line_end must span the FULL duration this line is visible.
         """
-        if not words or not timings or len(words) != len(timings):
+        total_duration = line_end - line_start
+        if total_duration <= 0 or not words:
             return ""
-        
+
+        # Each word gets equal time slice
+        word_duration = total_duration / len(words)
         karaoke_parts = []
-        line_start = timings[0][0]
-        line_end = timings[-1][1]
-        
-        for i, (word, (w_start, w_end)) in enumerate(zip(words, timings)):
-            # \k duration in centiseconds
-            word_cs = max(1, int((w_end - w_start) * 100))
+
+        for word in words:
+            # \k duration in centiseconds (1 cs = 0.01s)
+            word_cs = max(1, int(word_duration * 100))
             clean_word = self._escape_ass_text(word)
-            
+
+            # Check emphasis
             is_emphasis = any(ew.lower() in word.lower() for ew in emphasis_words)
-            
+
             if is_emphasis:
                 karaoke_parts.append(f"{{\\rGlow\\k{word_cs}}}{clean_word}")
             else:
                 karaoke_parts.append(f"{{\\k{word_cs}}}{clean_word}")
-        
+
         text = " ".join(karaoke_parts)
         start_ass = self._time_to_ass(line_start)
         end_ass = self._time_to_ass(line_end)
-        
+
         return f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text}"
-    
-    def _get_whisper_word_timings(self, audio_path: str, original_words: List[str]) -> List[Tuple[float, float]]:
-        """
-        Get precise word timings from Whisper.
-        Maps Whisper's transcribed words back to original Hinglish words.
-        """
-        model = self._get_whisper_model()
-        if not model:
-            return []
-        
-        try:
-            result = model.transcribe(audio_path, word_timestamps=True, language="hi")
-            
-            whisper_words = []
-            for seg in result.get("segments", []):
-                for word_info in seg.get("words", []):
-                    whisper_words.append({
-                        "word": word_info["word"].strip(),
-                        "start": float(word_info["start"]),
-                        "end": float(word_info["end"])
-                    })
-            
-            if not whisper_words:
-                return []
-            
-            # Map Whisper timings to original Hinglish words
-            # Strategy: Whisper gives more words (Hindi+English split differently)
-            # We distribute Whisper timings proportionally across original words
-            return self._map_timings_to_original(whisper_words, original_words)
-            
-        except Exception as e:
-            print(f"Whisper timing error: {e}")
-            return []
-    
-    def _map_timings_to_original(self, whisper_words: List[Dict], original_words: List[str]) -> List[Tuple[float, float]]:
-        """
-        Map Whisper's word timings to original Hinglish words.
-        Uses character-count proportion for distribution.
-        """
-        if not whisper_words:
-            return []
-        
-        # Flatten all whisper word text
-        whisper_text = "".join(w["word"].strip() for w in whisper_words).lower()
-        original_text = "".join(w.strip() for w in original_words).lower()
-        
-        # Total duration covered by whisper
-        total_start = whisper_words[0]["start"]
-        total_end = whisper_words[-1]["end"]
-        total_duration = total_end - total_start
-        
-        # Distribute timings based on character count of original words
-        original_chars = [len(w) for w in original_words]
-        total_chars = sum(original_chars)
-        
-        if total_chars == 0:
-            # Even fallback
-            per_word = total_duration / len(original_words)
-            return [(total_start + i * per_word, total_start + (i + 1) * per_word) 
-                    for i in range(len(original_words))]
-        
-        timings = []
-        current_time = total_start
-        
-        for word, char_count in zip(original_words, original_chars):
-            word_duration = (char_count / total_chars) * total_duration
-            word_start = current_time
-            word_end = current_time + word_duration
-            timings.append((word_start, word_end))
-            current_time = word_end
-        
-        return timings
-    
-    def _group_words_into_lines(self, words: List[str], 
-                                 timings: List[Tuple[float, float]],
-                                 max_words_per_line: int = 3) -> List[Tuple[List[str], List[Tuple[float, float]]]]:
-        """Group words and their timings into display lines."""
-        if not words or not timings:
-            return []
-        
-        lines = []
-        current_words = []
-        current_timings = []
-        
-        for word, timing in zip(words, timings):
-            current_words.append(word)
-            current_timings.append(timing)
-            
-            is_last = (word == words[-1])
-            should_break = (
-                len(current_words) >= max_words_per_line or
-                word.endswith(('.', '!', '?', '।', ',')) or
-                is_last
-            )
-            
-            if should_break and current_words:
-                lines.append((current_words.copy(), current_timings.copy()))
-                current_words = []
-                current_timings = []
-        
-        # Handle any remaining
-        if current_words:
-            lines.append((current_words, current_timings))
-        
-        return lines
-    
-    def generate_segment_captions(self, segment: ScriptSegment, audio_path: str,
+
+    def generate_segment_captions(self, segment: ScriptSegment,
                                    start_time: float, end_time: float) -> List[str]:
         """
-        Generate karaoke ASS lines with PRECISE timing.
-        Uses Whisper for timing, original Hinglish for text.
+        Generate karaoke ASS lines for ONE segment.
+        The ENTIRE segment text is distributed across the FULL segment duration.
         """
         words = self._split_into_words(segment.text)
-        
-        # Get precise timings from Whisper
-        timings = self._get_whisper_word_timings(audio_path, words)
-        
-        # Fallback: even distribution if Whisper fails
-        if not timings:
-            duration = end_time - start_time
-            word_duration = duration / len(words)
-            timings = [(start_time + i * word_duration, start_time + (i + 1) * word_duration) 
-                       for i in range(len(words))]
-        
-        # Group into lines
-        grouped = self._group_words_into_lines(words, timings, max_words_per_line=3)
-        
+        if not words:
+            return []
+
+        total_duration = end_time - start_time
+        if total_duration <= 0:
+            return []
+
+        # Group words into lines of ~3 words max
         lines = []
-        for word_list, word_timings in grouped:
-            ass_line = self._generate_karaoke_line(word_list, word_timings, segment.emphasis_words)
-            if ass_line:
-                lines.append(ass_line)
-        
+        current_line_words = []
+        current_line_start = start_time
+
+        for i, word in enumerate(words):
+            current_line_words.append(word)
+
+            # Decide whether to break line
+            is_last_word = (i == len(words) - 1)
+            should_break = (
+                len(current_line_words) >= 3 or  # max 3 words per line
+                word.endswith(('.', '!', '?', '।', ',')) or  # punctuation break
+                is_last_word
+            )
+
+            if should_break and current_line_words:
+                # Calculate proportional end time for this line
+                words_so_far = sum(len(lines[-1][0]) for lines in lines) + len(current_line_words) if lines else len(current_line_words)
+                # Actually, simpler: distribute proportionally by word count
+                total_words = len(words)
+                words_in_this_line = len(current_line_words)
+                words_before = i + 1 - words_in_this_line
+
+                # Start = segment_start + (words_before/total) * duration
+                line_start = start_time + (words_before / total_words) * total_duration
+                # End = segment_start + (words_before + words_in_line)/total * duration
+                line_end = start_time + ((words_before + words_in_this_line) / total_words) * total_duration
+
+                # Ensure last line ends exactly at segment end
+                if is_last_word:
+                    line_end = end_time
+
+                ass_line = self._generate_karaoke_line(
+                    current_line_words, line_start, line_end, segment.emphasis_words
+                )
+                if ass_line:
+                    lines.append(ass_line)
+
+                current_line_words = []
+
         return lines
-    
+
     def build_ass_file(self, audio_segments: List[AudioSegment]) -> str:
-        """Build complete ASS subtitle file."""
+        """Build complete ASS subtitle file from all audio segments."""
         self.ass_lines = [self.ASS_HEADER.strip()]
-        
+
         for seg in audio_segments:
             segment_lines = self.generate_segment_captions(
-                seg.segment, seg.audio_path, seg.start_time, seg.end_time
+                seg.segment, seg.start_time, seg.end_time
             )
             self.ass_lines.extend(segment_lines)
-        
+
         ass_path = str(Config.AUDIO_DIR / "karaoke_captions.ass")
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write("\n".join(self.ass_lines))
-        
+
         return ass_path
+                                       
                                
 
 
