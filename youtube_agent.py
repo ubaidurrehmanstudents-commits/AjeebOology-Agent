@@ -107,32 +107,27 @@ class AudioSegment:
 
 
         
+
 # =============================================================================
-# KARAOKE CAPTION ENGINE (FINAL FIX — Correct Sync + True Center)
+# KARAOKE CAPTION ENGINE (DEFINITIVE FIX)
 # =============================================================================
 
 class CaptionEngine:
     """
-    Generates karaoke-style ASS subtitles.
-    FIXED: Proper timing sync + true center alignment.
+    Karaoke captions with PERFECT center alignment.
+    Uses ASS with Alignment=5 (middle-left) + explicit x/y positioning via \pos tag.
     """
 
-    # Alignment=10 = center horizontally, center vertically (ASS v4+)
-    # MarginV=850 pushes text to vertical center of 1920px screen
-    # Fontsize=68 for readability
     ASS_HEADER = """[Script Info]
-Title: Ajeebology Karaoke Captions
+Title: Ajeebology Karaoke
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
-WrapStyle: 0
-ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans Bold,68,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,3,10,40,40,850,1
-Style: Highlight,DejaVu Sans Bold,68,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,105,105,0,0,1,5,4,10,40,40,850,1
-Style: Glow,DejaVu Sans Bold,72,&H00FF0080,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,6,5,10,40,40,850,1
+Style: Default,DejaVu Sans Bold,68,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,3,5,0,0,0,1
+Style: Glow,DejaVu Sans Bold,72,&H00FF0080,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,6,5,5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -142,186 +137,88 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         self.ass_lines = []
 
     def _time_to_ass(self, seconds: float) -> str:
-        """Convert seconds to ASS time format: H:MM:SS.cc"""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
         centis = int((seconds % 1) * 100)
         return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
 
-    def _escape_ass_text(self, text: str) -> str:
-        """Escape special ASS characters."""
+    def _escape_ass(self, text: str) -> str:
         text = text.replace("\\", "\\\\")
         text = text.replace("{", "\\{")
         text = text.replace("}", "\\}")
         return text
 
-    def _split_into_words(self, text: str) -> List[str]:
-        """Split text into words preserving punctuation."""
-        words = []
-        for word in text.split():
-            word = word.strip()
-            if word:
-                words.append(word)
-        return words
+    def _split_words(self, text: str) -> List[str]:
+        return [w.strip() for w in text.split() if w.strip()]
 
-    def _generate_karaoke_line(self, words: List[str], line_start: float,
-                                line_end: float, emphasis_words: List[str]) -> str:
-        """
-        Generate a single karaoke dialogue line with \k tags.
-        CRITICAL: line_start and line_end must span the FULL duration this line is visible.
-        """
-        total_duration = line_end - line_start
-        if total_duration <= 0 or not words:
-            return ""
-
-        # Each word gets equal time slice
-        word_duration = total_duration / len(words)
-        karaoke_parts = []
-
-        for word in words:
-            # \k duration in centiseconds (1 cs = 0.01s)
-            word_cs = max(1, int(word_duration * 100))
-            clean_word = self._escape_ass_text(word)
-
-            # Check emphasis
-            is_emphasis = any(ew.lower() in word.lower() for ew in emphasis_words)
-
-            if is_emphasis:
-                karaoke_parts.append(f"{{\\rGlow\\k{word_cs}}}{clean_word}")
-            else:
-                karaoke_parts.append(f"{{\\k{word_cs}}}{clean_word}")
-
-        text = " ".join(karaoke_parts)
-        start_ass = self._time_to_ass(line_start)
-        end_ass = self._time_to_ass(line_end)
-
-        return f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text}"
-
-    def generate_segment_captions(self, segment: ScriptSegment,
-                                   start_time: float, end_time: float) -> List[str]:
-        """
-        Generate karaoke ASS lines for ONE segment.
-        The ENTIRE segment text is distributed across the FULL segment duration.
-        """
-        words = self._split_into_words(segment.text)
+    def generate_segment(self, segment: ScriptSegment, start: float, end: float) -> List[str]:
+        words = self._split_words(segment.text)
         if not words:
             return []
 
-        total_duration = end_time - start_time
-        if total_duration <= 0:
-            return []
+        duration = end - start
+        word_dur = duration / len(words)
 
-        # Group words into lines of ~3 words max
         lines = []
-        current_line_words = []
-        current_line_start = start_time
+        current_words = []
+        current_timings = []
 
         for i, word in enumerate(words):
-            current_line_words.append(word)
+            current_words.append(word)
+            w_start = start + i * word_dur
+            w_end = w_start + word_dur
+            current_timings.append((w_start, w_end))
 
-            # Decide whether to break line
-            is_last_word = (i == len(words) - 1)
-            should_break = (
-                len(current_line_words) >= 3 or  # max 3 words per line
-                word.endswith(('.', '!', '?', '।', ',')) or  # punctuation break
-                is_last_word
-            )
+            is_last = (i == len(words) - 1)
+            should_break = len(current_words) >= 3 or word.endswith(('.','!','?','।',',')) or is_last
 
-            if should_break and current_line_words:
-                # Calculate proportional end time for this line
-                words_so_far = sum(len(lines[-1][0]) for lines in lines) + len(current_line_words) if lines else len(current_line_words)
-                # Actually, simpler: distribute proportionally by word count
-                total_words = len(words)
-                words_in_this_line = len(current_line_words)
-                words_before = i + 1 - words_in_this_line
+            if should_break:
+                # Build karaoke line with \pos for center positioning
+                karaoke_parts = []
+                for j, (cw, (cs, ce)) in enumerate(zip(current_words, current_timings)):
+                    cs_int = max(1, int((ce - cs) * 100))
+                    esc = self._escape_ass(cw)
+                    is_emph = any(e.lower() in cw.lower() for e in segment.emphasis_words)
+                    style = "Glow" if is_emph else "Default"
+                    karaoke_parts.append(f"{{\\r{style}\\k{cs_int}}}{esc}")
 
-                # Start = segment_start + (words_before/total) * duration
-                line_start = start_time + (words_before / total_words) * total_duration
-                # End = segment_start + (words_before + words_in_line)/total * duration
-                line_end = start_time + ((words_before + words_in_this_line) / total_words) * total_duration
+                line_text = " ".join(karaoke_parts)
 
-                # Ensure last line ends exactly at segment end
-                if is_last_word:
-                    line_end = end_time
+                # CRITICAL: Use \pos(x,y) for explicit center positioning
+                # \an5 = center alignment anchor point
+                # \pos(540, 960) = center of 1080x1920 screen
+                pos_text = f"{{\\an5\\pos(540,960)}}{line_text}"
 
-                ass_line = self._generate_karaoke_line(
-                    current_line_words, line_start, line_end, segment.emphasis_words
-                )
-                if ass_line:
-                    lines.append(ass_line)
+                line_start = current_timings[0][0]
+                line_end = current_timings[-1][1]
+                if is_last:
+                    line_end = end
 
-                current_line_words = []
+                start_ass = self._time_to_ass(line_start)
+                end_ass = self._time_to_ass(line_end)
+
+                lines.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{pos_text}")
+
+                current_words = []
+                current_timings = []
 
         return lines
 
     def build_ass_file(self, audio_segments: List[AudioSegment]) -> str:
-        """Build complete ASS subtitle file from all audio segments."""
         self.ass_lines = [self.ASS_HEADER.strip()]
 
         for seg in audio_segments:
-            segment_lines = self.generate_segment_captions(
+            self.ass_lines.extend(self.generate_segment(
                 seg.segment, seg.start_time, seg.end_time
-            )
-            self.ass_lines.extend(segment_lines)
+            ))
 
         ass_path = str(Config.AUDIO_DIR / "karaoke_captions.ass")
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write("\n".join(self.ass_lines))
 
         return ass_path
-                                       
-                               
-
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-def setup_directories():
-    """Create all necessary directories."""
-    for d in [Config.FRAMES_DIR, Config.AUDIO_DIR, Config.ASSETS_DIR, Config.OUTPUT_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
-
-def run_command(cmd: List[str], timeout: int = 300) -> Tuple[int, str, str]:
-    """Run shell command with timeout, return (returncode, stdout, stderr)."""
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        )
-        return result.returncode, result.stdout, result.stderr
-    except subprocess.TimeoutExpired:
-        return -1, "", "Command timed out"
-
-def get_audio_duration(path: str) -> float:
-    """Get audio duration using ffprobe."""
-    cmd = [
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", path
-    ]
-    rc, out, _ = run_command(cmd)
-    if rc == 0 and out.strip():
-        return float(out.strip())
-    return 0.0
-
-def download_file(url: str, dest: str, timeout: int = 30) -> bool:
-    """Download file with retry logic."""
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, timeout=timeout, stream=True)
-            if resp.status_code == 200:
-                with open(dest, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                return True
-        except Exception as e:
-            print(f"Download attempt {attempt + 1} failed: {e}")
-            time.sleep(2 ** attempt)
-    return False
-
-def safe_filename(text: str) -> str:
-    """Create safe filename from text."""
-    return re.sub(r'[^a-zA-Z0-9_-]', '_', text)[:50]
+            
 
 # =============================================================================
 # 1. RESEARCH MODULE (Tavily)
