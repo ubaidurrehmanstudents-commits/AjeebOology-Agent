@@ -46,6 +46,7 @@ jobs:
           fonts-noto-core \
           fonts-noto-devanagari
         ffmpeg -version | head -1
+        fc-list | grep -i noto | head -5 || echo "Noto fonts check complete"
     
     - name: Install Python dependencies
       run: |
