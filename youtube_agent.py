@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Ajeebology Shorts - Professional YouTube Shorts Automation Agent
-Fully automated pipeline: Research -> Script -> Voice -> Video -> Telegram
+Fully automated pipeline: Research -> Script -> Voice -> Video -> Upload
 Language: Hinglish (Roman Hindi + English), Male voice
-Output: Vertical 1080x1920, 24 FPS, <= 60s (YouTube Shorts limit)
-KARAOKE CAPTIONS: Word-by-word animated highlighting via ASS subtitles
-             (real per-word timing from edge-tts WordBoundary events)
+Output: Vertical 1080x1920, ~55-65 seconds, 24 FPS
+Features: Karaoke ASS captions, Pexels video b-roll, audio ducking, YouTube upload
 """
 
 import os
@@ -14,25 +13,21 @@ import json
 import re
 import math
 import random
-import textwrap
-import asyncio
 import tempfile
 import subprocess
 import shutil
 import time
 import hashlib
-import base64
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from urllib.parse import quote_plus, urlparse
 from io import BytesIO
 
 import requests
-import edge_tts
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import numpy as np
-
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # =============================================================================
 # CONFIGURATION
@@ -43,21 +38,27 @@ class Config:
     TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
+    YOUTUBE_CLIENT_SECRETS = os.environ.get("YOUTUBE_CLIENT_SECRETS", "")
+    PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
+    UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
+    GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "local")
+    CATEGORY_OVERRIDE = os.environ.get("CATEGORY_OVERRIDE", "")
+    
     WIDTH = 1080
     HEIGHT = 1920
     FPS = 24
-    TARGET_DURATION = 55
-    MAX_DURATION = 60
-
+    TARGET_DURATION = 58
+    MAX_DURATION = 64
+    
     VOICE_MODEL = "hi-IN-MadhurNeural"
-    VOICE_FALLBACK = "hi-IN-ArjunNeural"
     AUDIO_SAMPLE_RATE = 44100
-
+    
+    FONT_PATH = "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf"
+    FONT_PATH_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     FONT_SIZE_TITLE = 72
     FONT_SIZE_BODY = 56
-    FONT_SIZE_SMALL = 40
-
+    FONT_SIZE_CAPTION = 58
+    
     COLOR_BG_DARK = (10, 5, 25)
     COLOR_BG_MID = (30, 15, 60)
     COLOR_ACCENT = (0, 255, 255)
@@ -65,37 +66,22 @@ class Config:
     COLOR_TEXT = (255, 255, 255)
     COLOR_TEXT_DIM = (200, 200, 220)
     COLOR_HIGHLIGHT = (255, 255, 0)
-
+    
     BASE_DIR = Path("/tmp/ajeebology")
     FRAMES_DIR = BASE_DIR / "frames"
     AUDIO_DIR = BASE_DIR / "audio"
     ASSETS_DIR = BASE_DIR / "assets"
     OUTPUT_DIR = BASE_DIR / "output"
-
+    
     BROLL_ENABLED = True
-    UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
-    PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
     POLLINATIONS_ENABLED = True
 
-    KARAOKE_WORDS_PER_LINE = 3
-    KARAOKE_FONT_SIZE = 64
-
-    HISTORY_FILE = BASE_DIR / "history.json"
-    MAX_HISTORY_DAYS = 30
-
-    CATEGORY_OVERRIDE = os.environ.get("CATEGORY_OVERRIDE", "")
-
+# Seed random for deterministic builds
+random.seed(Config.GITHUB_RUN_ID)
 
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
-
-@dataclass
-class WordTiming:
-    text: str
-    start: float
-    end: float
-
 
 @dataclass
 class ScriptSegment:
@@ -103,7 +89,6 @@ class ScriptSegment:
     segment_type: str
     emphasis_words: List[str] = field(default_factory=list)
     broll_prompt: str = ""
-
 
 @dataclass
 class VideoScript:
@@ -116,7 +101,6 @@ class VideoScript:
     segments: List[ScriptSegment]
     total_duration_estimate: float = 0.0
 
-
 @dataclass
 class AudioSegment:
     segment: ScriptSegment
@@ -124,119 +108,481 @@ class AudioSegment:
     duration: float
     start_time: float
     end_time: float
-    word_timings: List[WordTiming] = field(default_factory=list)
-
 
 # =============================================================================
-# HISTORY (deduplication)
+# UTILITIES
 # =============================================================================
-
-def load_history() -> List[Dict]:
-    try:
-        if Config.HISTORY_FILE.exists():
-            with open(Config.HISTORY_FILE, "r") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
-
-
-def save_history_entry(entry: Dict):
-    history = load_history()
-    history.append(entry)
-    cutoff = time.time() - (Config.MAX_HISTORY_DAYS * 86400)
-    history = [h for h in history if h.get("ts", 0) >= cutoff]
-    history = history[-200:]
-    Config.HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(Config.HISTORY_FILE, "w") as f:
-        json.dump(history, f)
-
-
-def was_title_used(title: str) -> bool:
-    history = load_history()
-    norm = re.sub(r"\W+", "", title.lower())
-    return any(re.sub(r"\W+", "", h.get("title", "").lower()) == norm for h in history)
-
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-def setup_directories():
-    """Create all necessary directories."""
-    for d in [Config.FRAMES_DIR, Config.AUDIO_DIR, Config.ASSETS_DIR, Config.OUTPUT_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
-
 
 def run_command(cmd: List[str], timeout: int = 300) -> Tuple[int, str, str]:
     """Run shell command with timeout."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
+        )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
         return -1, "", "Command timed out"
 
-
 def get_audio_duration(path: str) -> float:
-    """Get audio duration via ffprobe."""
+    """Get audio duration using ffprobe."""
     cmd = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", path
     ]
-    rc, out, _ = run_command(cmd)
+    rc, out, _ = run_command(cmd, timeout=30)
     if rc == 0 and out.strip():
-        try:
-            return float(out.strip())
-        except ValueError:
-            pass
+        return float(out.strip())
     return 0.0
 
+def ensure_dirs():
+    """Create all necessary directories."""
+    for d in [Config.FRAMES_DIR, Config.AUDIO_DIR, Config.ASSETS_DIR, Config.OUTPUT_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
 
-def download_file(url: str, dest: str, timeout: int = 30) -> bool:
-    """Download file with retry logic."""
-    for attempt in range(3):
+def load_font(size: int) -> ImageFont.FreeTypeFont:
+    """Load font with fallback."""
+    for path in [Config.FONT_PATH, Config.FONT_PATH_FALLBACK]:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+# =============================================================================
+# 1. SCRIPT GENERATION (Groq/LLaMA)
+# =============================================================================
+
+class ScriptAgent:
+    SYSTEM_PROMPT = """You are a professional YouTube Shorts scriptwriter for the channel 'AjeebOology'.
+Create engaging, fact-packed scripts in Hinglish (Roman Hindi + English mix).
+Target audience: Indian youth aged 18-34.
+Tone: Curious, energetic, slightly dramatic, educational but entertaining.
+
+Rules:
+- Hook must be under 4 seconds, create a "pattern interrupt"
+- Each script has: hook, fact1, fact2, fact3, conclusion
+- Total spoken words: 140-170 (roughly 55-62 seconds)
+- Emphasis words: 2-3 per segment (for visual punch)
+- B-roll prompts: vivid, specific image/video search terms
+- Output valid JSON only
+
+JSON Format:
+{
+  "title": "Short catchy title",
+  "category": "psychology|space|weird_facts",
+  "seo_title": "SEO optimized title under 100 chars",
+  "description": "2-3 lines with keywords",
+  "tags": ["tag1", "tag2", ...],
+  "hashtags": ["#Shorts", "#AjeebOology", ...],
+  "segments": [
+    {
+      "text": "Spoken text here",
+      "segment_type": "hook|fact1|fact2|fact3|conclusion",
+      "emphasis_words": ["word1", "word2"],
+      "broll_prompt": "search keywords for visuals"
+    }
+  ]
+}"""
+
+    def __init__(self):
+        self.api_key = Config.GROQ_API_KEY
+        self.url = "https://api.groq.com/openai/v1/chat/completions"
+    
+    def generate_script(self, research_data: Dict) -> VideoScript:
+        """Generate script via Groq API."""
+        category = Config.CATEGORY_OVERRIDE or random.choice(["psychology", "space", "weird_facts"])
+        prompt = f"""Create a YouTube Shorts script about: {research_data.get('topic', category)}.
+Category: {category}
+Make it mind-blowing, use Hinglish. Include 2-3 emphasis words per segment.
+Return ONLY valid JSON."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.85,
+            "max_tokens": 1200,
+            "response_format": {"type": "json_object"}
+        }
         try:
-            resp = requests.get(url, timeout=timeout, stream=True)
-            if resp.status_code == 200:
-                with open(dest, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                return True
+            resp = requests.post(self.url, headers=headers, json=payload, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()["choices"][0]["message"]["content"]
+            if isinstance(data, str):
+                data = json.loads(data)
+            return self._parse_script(data, category)
         except Exception as e:
-            print(f"Download attempt {attempt + 1} failed: {e}")
-            time.sleep(2 ** attempt)
-    return False
+            print(f"Script generation error: {e}")
+            return self._fallback_script(category)
+    
+    def _parse_script(self, data: Dict, category: str) -> VideoScript:
+        segments = []
+        for seg in data.get("segments", []):
+            segments.append(ScriptSegment(
+                text=seg.get("text", ""),
+                segment_type=seg.get("segment_type", "fact"),
+                emphasis_words=seg.get("emphasis_words", []),
+                broll_prompt=seg.get("broll_prompt", "")
+            ))
+        return VideoScript(
+            title=data.get("title", "Ajeebology Short"),
+            category=category,
+            seo_title=data.get("seo_title", "Ajeebology Short"),
+            description=data.get("description", ""),
+            tags=data.get("tags", []),
+            hashtags=data.get("hashtags", ["#Shorts", "#AjeebOology"]),
+            segments=segments
+        )
 
 
-def safe_filename(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]", "_", text)[:50]
+    def _fallback_script(self, category: str) -> VideoScript:
+        texts = {
+            "psychology": [
+                "Kya aap jante hain ki aapka brain 70 percent waqt auto-pilot par rehta hai?",
+                "Jab aap drive kar rahe hote hain, tab aapka subconscious mind control mein hota hai.",
+                "Aur jab aap sochte hain ki aap conscious hain, woh bhi ek illusion hai!",
+                "Scientists ne prove kiya hai ki decisions 7 seconds pehle brain mein ban chuke hote hain.",
+                "Toh agli baar jab koi decision lo, yaad rakhna - aapka brain pehle se hi decide kar chuka tha!"
+            ],
+            "space": [
+                "Space mein aawaz kyun nahi jaati? Reason sunke shock ho jaaoge!",
+                "Aawaz travel karne ke liye medium chahiye, aur space mein vacuum hai.",
+                "Lekin suno, agar aap Mars pe khade hokar chillao, toh wahan ke atmosphere mein aawaz jayegi!",
+                "Aur NASA ke microphones ne actually Mars ki aawazein record ki hain!",
+                "Toh space silent nahi hai, bas uska silence alag tarah ka hai!"
+            ],
+            "weird_facts": [
+                "Yeh fact sunke aapka dimaag ghoom jayega!",
+                "Honey kabhi spoil nahi hota. Archaeologists ne 3000 saal purana honey khaya aur woh theek tha!",
+                "Aur octopus ke paas 3 dil hote hain, aur woh blue blood rakhte hain!",
+                "Banana technically ek berry hai, aur strawberry technically berry nahi hai!",
+                "Duniya itni ajeeb hai ki facts bhi confuse ho jate hain!"
+            ]
+        }
+        segs = []
+        types = ["hook", "fact1", "fact2", "fact3", "conclusion"]
+        for i, t in enumerate(texts.get(category, texts["weird_facts"])):
+            segs.append(ScriptSegment(
+                text=t, segment_type=types[i],
+                emphasis_words=["shock", "amazing"] if i == 0 else ["fact", "wow"]
+            ))
+        return VideoScript(
+            title="Ajeebology Fact", category=category, seo_title="Amazing Fact | AjeebOology",
+            description="Incredible facts in Hinglish", tags=[category, "facts", "shorts"],
+            hashtags=["#Shorts", "#AjeebOology", "#Facts"], segments=segs
+        )
 
+# =============================================================================
+# 2. RESEARCH AGENT (Tavily)
+# =============================================================================
 
-def trim_audio_to_max(audio_path: str, max_seconds: float) -> str:
-    """Trim audio to max duration. Returns path to trimmed file."""
-    duration = get_audio_duration(audio_path)
-    if duration <= max_seconds:
-        return audio_path
-    out_path = audio_path.replace(".mp3", "_trim.mp3")
-    cmd = [
-        "ffmpeg", "-y", "-i", audio_path,
-        "-t", str(max_seconds),
-        "-acodec", "libmp3lame", "-q:a", "2",
-        out_path
-    ]
-    run_command(cmd)
-    return out_path if os.path.exists(out_path) else audio_path
+class ResearchAgent:
+    def __init__(self):
+        self.api_key = Config.TAVILY_API_KEY
+        self.url = "https://api.tavily.com/search"
+    
+    def research(self, category: str) -> Dict:
+        """Fetch trending topics and facts."""
+        queries = {
+            "psychology": "mind-blowing psychology facts 2026 trending",
+            "space": "latest space discoveries 2026 NASA trending",
+            "weird_facts": "incredible weird facts 2026 viral"
+        }
+        query = queries.get(category, queries["weird_facts"])
+        payload = {
+            "api_key": self.api_key,
+            "query": query,
+            "search_depth": "basic",
+            "max_results": 5
+        }
+        try:
+            resp = requests.post(self.url, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+            if results:
+                return {"topic": results[0].get("title", category), "results": results}
+        except Exception as e:
+            print(f"Research error: {e}")
+        return {"topic": category, "results": []}
+
+# =============================================================================
+# 3. VOICE GENERATION (Edge-TTS)
+# =============================================================================
+
+class VoiceAgent:
+    def __init__(self):
+        self.model = Config.VOICE_MODEL
+    
+    def generate_voice(self, script: VideoScript) -> List[AudioSegment]:
+        """Generate TTS for each segment and build timeline."""
+        audio_segments = []
+        current_time = 0.0
+        
+        for i, seg in enumerate(script.segments):
+            clean_text = self._clean_for_tts(seg.text)
+            output_path = str(Config.AUDIO_DIR / f"seg_{i:02d}.mp3")
+            
+            if self._generate_with_edge_tts(clean_text, output_path):
+                duration = get_audio_duration(output_path)
+                if duration < 0.5:
+                    duration = self._estimate_duration(clean_text)
+            else:
+                duration = self._estimate_duration(clean_text)
+                self._create_silent_audio(output_path, duration)
+            
+            audio_segments.append(AudioSegment(
+                segment=seg, audio_path=output_path,
+                duration=duration, start_time=current_time,
+                end_time=current_time + duration
+            ))
+            current_time += duration
+        
+        script.total_duration_estimate = current_time
+        return audio_segments
+    
+    def _clean_for_tts(self, text: str) -> str:
+        """Clean text for TTS."""
+        text = re.sub(r"[#@]\w+", "", text)
+        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"[\*\_\~\`]", "", text)
+        return text.strip()
+    
+    def _generate_with_edge_tts(self, text: str, output_path: str) -> bool:
+        """Generate voice using edge-tts."""
+        try:
+            import edge_tts
+            import asyncio
+            async def _gen():
+                communicate = edge_tts.Communicate(text, self.model)
+                await communicate.save(output_path)
+            asyncio.run(_gen())
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 1024
+        except Exception as e:
+            print(f"Edge-TTS error: {e}")
+            return False
+    
+    def _estimate_duration(self, text: str) -> float:
+        """Estimate duration based on word count."""
+        words = len(text.split())
+        return max(1.5, words * 0.35)
+    
+    def _create_silent_audio(self, path: str, duration: float):
+        """Create silent audio fallback."""
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-t", str(duration), "-acodec", "libmp3lame", "-q:a", "4", path
+        ]
+        run_command(cmd, timeout=30)
+    
+    def mix_audio(self, audio_segments: List[AudioSegment],
+                  bg_music_path: Optional[str] = None) -> str:
+        """Mix voice with background music using sidechain compression."""
+        # Concatenate all voice segments
+        concat_list = str(Config.AUDIO_DIR / "concat_list.txt")
+        with open(concat_list, "w") as f:
+            for seg in audio_segments:
+                f.write(f"file '{seg.audio_path}'\n")
+        
+        voice_concat = str(Config.AUDIO_DIR / "voice_concat.mp3")
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", concat_list, "-c", "copy", voice_concat
+        ]
+        run_command(cmd, timeout=60)
+        
+        final_audio = str(Config.AUDIO_DIR / "final_audio.mp3")
+        
+        if bg_music_path and os.path.exists(bg_music_path):
+            filter_complex = (
+                "[1:a]asplit=2[sc][mix];"
+                "[sc]sidechaincompress=threshold=0.05:ratio=5:attack=50:release=200[bg];"
+                "[0:a][bg]amix=inputs=2:duration=first:weights=1 0.25[Mixed];"
+                "[Mixed]loudnorm=I=-14:TP=-1.5:LRA=11[out]"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-i", voice_concat, "-i", bg_music_path,
+                "-filter_complex", filter_complex,
+                "-map", "[out]", "-c:a", "libmp3lame", "-q:a", "2",
+                "-ar", str(Config.AUDIO_SAMPLE_RATE), final_audio
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-i", voice_concat,
+                "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+                "-c:a", "libmp3lame", "-q:a", "2",
+                "-ar", str(Config.AUDIO_SAMPLE_RATE), final_audio
+            ]
+        
+        rc, _, err = run_command(cmd, timeout=120)
+        if rc != 0 or not os.path.exists(final_audio):
+            print(f"Audio mix error: {err}")
+            shutil.copy(voice_concat, final_audio)
+        
+        return final_audio
+
+# =============================================================================
+# 4. ASSET AGENT (B-Roll + Background Music + SFX)
+# =============================================================================
+
+class AssetAgent:
+    def __init__(self):
+        self.unsplash_key = Config.UNSPLASH_ACCESS_KEY
+        self.pexels_key = Config.PEXELS_API_KEY
+    
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def fetch_broll(self, prompt: str, index: int) -> Optional[str]:
+        """Fetch b-roll asset. Try Pexels video first, then images."""
+        dest = str(Config.ASSETS_DIR / f"broll_{index:02d}.mp4")
+        img_dest = str(Config.ASSETS_DIR / f"broll_{index:02d}.jpg")
+        
+        if self.pexels_key and self._try_pexels_video(prompt, dest):
+            return dest
+        if self._try_unsplash(prompt, img_dest):
+            return img_dest
+        if Config.POLLINATIONS_ENABLED and self._try_pollinations(prompt, img_dest):
+            return img_dest
+        if self._try_pexels_image(prompt, img_dest):
+            return img_dest
+        return None
+    
+    def _try_pexels_video(self, prompt: str, dest: str) -> bool:
+        """Fetch vertical video from Pexels."""
+        try:
+            url = f"https://api.pexels.com/videos/search?query={quote_plus(prompt)}&per_page=5&orientation=portrait"
+            headers = {"Authorization": self.pexels_key}
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            videos = resp.json().get("videos", [])
+            for vid in videos:
+                files = vid.get("video_files", [])
+                for vf in files:
+                    if vf.get("quality") in ["sd", "hd"]:
+                        vurl = vf.get("link", "")
+                        if vurl:
+                            r = requests.get(vurl, timeout=30)
+                            if r.status_code == 200:
+                                with open(dest, "wb") as f:
+                                    f.write(r.content)
+                                return os.path.exists(dest) and os.path.getsize(dest) > 10240
+            return False
+        except Exception as e:
+            print(f"Pexels video error: {e}")
+            return False
+    
+    def _try_unsplash(self, prompt: str, dest: str) -> bool:
+        """Fetch image from Unsplash."""
+        try:
+            url = f"https://api.unsplash.com/photos/random?query={quote_plus(prompt)}&orientation=portrait"
+            headers = {"Authorization": f"Client-ID {self.unsplash_key}"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            img_url = resp.json()["urls"]["regular"]
+            r = requests.get(img_url, timeout=30)
+            if r.status_code == 200:
+                with open(dest, "wb") as f:
+                    f.write(r.content)
+                return os.path.exists(dest) and os.path.getsize(dest) > 10240
+            return False
+        except Exception as e:
+            print(f"Unsplash error: {e}")
+            return False
+    
+    def _try_pollinations(self, prompt: str, dest: str) -> bool:
+        """Fetch AI image from Pollinations."""
+        try:
+            url = f"https://image.pollinations.ai/prompt/{quote_plus(prompt)}?width=1080&height=1920&nologo=true&seed={random.randint(1,9999)}"
+            r = requests.get(url, timeout=60)
+            if r.status_code == 200:
+                with open(dest, "wb") as f:
+                    f.write(r.content)
+                return os.path.exists(dest) and os.path.getsize(dest) > 10240
+            return False
+        except Exception as e:
+            print(f"Pollinations error: {e}")
+            return False
+    
+    def _try_pexels_image(self, prompt: str, dest: str) -> bool:
+        """Fetch image from Pexels."""
+        try:
+            url = f"https://api.pexels.com/v1/search?query={quote_plus(prompt)}&per_page=5&orientation=portrait"
+            headers = {"Authorization": self.pexels_key}
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            photos = resp.json().get("photos", [])
+            if photos:
+                img_url = photos[0]["src"]["large"]
+                r = requests.get(img_url, timeout=30)
+                if r.status_code == 200:
+                    with open(dest, "wb") as f:
+                        f.write(r.content)
+                    return os.path.exists(dest) and os.path.getsize(dest) > 10240
+            return False
+        except Exception as e:
+            print(f"Pexels image error: {e}")
+            return False
+    
+    def fetch_background_music(self) -> Optional[str]:
+        """Fetch royalty-free background music."""
+        dest = str(Config.ASSETS_DIR / "bg_music.mp3")
+        if os.path.exists(dest):
+            return dest
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi",
+            "-i", "anoisesrc=a=0.02:c=pink:duration=65",
+            "-af", "lowpass=f=800, volume=0.3",
+            "-c:a", "libmp3lame", "-q:a", "4", dest
+        ]
+        rc, _, _ = run_command(cmd, timeout=30)
+        if rc == 0 and os.path.exists(dest):
+            return dest
+        return None
+    
+    def fetch_sfx(self, sfx_type: str, output_path: str) -> bool:
+        """Generate simple SFX using ffmpeg."""
+        generators = {
+            "pop": "sine=frequency=1000:duration=0.15",
+            "whoosh": "sine=frequency=200:duration=0.3",
+            "ding": "sine=frequency=800:duration=0.2"
+        }
+        gen = generators.get(sfx_type, generators["pop"])
+        cmd = [
+            "ffmpeg", "-y", "-f", "lavfi", "-i", gen,
+            "-af", "volume=0.4", "-c:a", "libmp3lame", "-q:a", "4", output_path
+        ]
+        rc, _, _ = run_command(cmd, timeout=15)
+        return rc == 0 and os.path.exists(output_path)
+
 
 
 # =============================================================================
-# 1. KARAOKE CAPTION ENGINE (ASS-based, real per-word timing)
+# 5. KARAOKE CAPTION ENGINE (ASS Subtitles)
 # =============================================================================
 
 class CaptionEngine:
-    """Generates karaoke-style ASS subtitles using REAL word timings from edge-tts."""
-
-    ASS_HEADER = """[Script Info]
-Title: Ajeebology Karaoke Captions
+    """
+    Generates professional karaoke captions using ASS subtitle format.
+    Word-by-word highlighting with smooth color transitions.
+    """
+    
+    def __init__(self):
+        self.ass_header = self._build_ass_header()
+    
+    def _build_ass_header(self) -> str:
+        """Build ASS file header with styles."""
+        white = "&H00FFFFFF"
+        cyan = "&H00FFFF00"      # BGR cyan
+        yellow = "&H0000FFFF"    # BGR yellow
+        black = "&H00000000"
+        
+        return f"""[Script Info]
+Title: AjeebOology Karaoke
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
@@ -245,1210 +591,752 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans Bold,64,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,900,1
-Style: Highlight,DejaVu Sans Bold,68,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,105,105,0,0,1,5,2,2,60,60,860,1
-Style: Glow,DejaVu Sans Bold,68,&H000080FF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,5,4,2,60,60,820,1
-Style: Outline,DejaVu Sans Bold,64,&H00FFFFFF,&H00000000,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,6,2,60,60,400,1
+Style: Default,Noto Sans Devanagari Bold,58,{white},{cyan},{black},{black},-1,0,0,0,100,100,0,0,1,3,0,2,40,40,140,1
+Style: Emphasis,Noto Sans Devanagari Bold,64,{yellow},{cyan},{black},{black},-1,0,0,0,110,110,0,0,1,4,0,2,40,40,140,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-
-    def __init__(self):
-        self.ass_lines: List[str] = []
-
-    def _time_to_ass(self, seconds: float) -> str:
-        if seconds < 0:
-            seconds = 0
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        centis = int((seconds % 1) * 100)
-        return f"{hours}:{minutes:02d}:{secs:02d}.{centis:02d}"
-
-    def _escape_ass_text(self, text: str) -> str:
-        text = text.replace("\\", "\\\\")
-        text = text.replace("{", "(")
-        text = text.replace("}", ")")
-        return text
-
-    def _group_words(self, word_timings: List[WordTiming], max_words: int = 3):
-        """Group consecutive words into display lines for Shorts readability."""
-        if not word_timings:
-            return []
-        lines = []
-        current = []
-        current_start = word_timings[0].start
-        for i, wt in enumerate(word_timings):
-            current.append(wt)
-            is_last = (i == len(word_timings) - 1)
-            should_break = len(current) >= max_words or is_last
-            if should_break and current:
-                line_end = wt.end
-                lines.append((current[:], current_start, line_end))
-                current = []
-                if not is_last:
-                    current_start = word_timings[i + 1].start
-        return lines
-
-    def _generate_karaoke_line(
-        self,
-        words: List[WordTiming],
-        line_start: float,
-        line_end: float,
-        emphasis_words: List[str],
-    ) -> str:
-        """Generate a single ASS Dialogue line with {\k} karaoke tags using REAL durations."""
-        if not words or line_end <= line_start:
-            return ""
-
-        line_dur_cs = max(int((line_end - line_start) * 100), 1)
-        parts = []
-        acc_cs = 0
-        for i, wt in enumerate(words):
-            word_dur_cs = int((wt.end - wt.start) * 100)
-            if i == len(words) - 1:
-                word_dur_cs = max(line_dur_cs - acc_cs, 1)
-            acc_cs += word_dur_cs
-
-            clean = self._escape_ass_text(wt.text)
-            parts.append(r"{\k%d}%s" % (word_dur_cs, clean))
-
-        text = " ".join(parts)
-        start_ass = self._time_to_ass(line_start)
-        end_ass = self._time_to_ass(line_end)
-        return f"Dialogue: 0,{start_ass},{end_ass},Glow,,0,0,0,,{text}"
-
+    
     def build_ass_file(self, audio_segments: List[AudioSegment]) -> str:
-        """Build the complete ASS subtitle file from audio segments with word timings."""
-        lines = [self.ASS_HEADER.strip()]
+        """Generate complete ASS file with word-by-word karaoke."""
+        ass_path = str(Config.OUTPUT_DIR / "karaoke.ass")
+        lines = [self.ass_header]
+        
         for seg in audio_segments:
-            if not seg.word_timings:
+            words = seg.segment.text.split()
+            if not words:
                 continue
-            grouped = self._group_words(seg.word_timings, max_words=Config.KARAOKE_WORDS_PER_LINE)
-            for word_list, line_start, line_end in grouped:
-                ass_line = self._generate_karaoke_line(
-                    word_list, line_start, line_end, seg.segment.emphasis_words
-                )
-                if ass_line:
-                    lines.append(ass_line)
-
-        ass_path = str(Config.AUDIO_DIR / "karaoke_captions.ass")
+            
+            seg_duration = seg.end_time - seg.start_time
+            word_duration = seg_duration / max(len(words), 1)
+            
+            # Build karaoke line with \k tags (centiseconds)
+            karaoke_text = ""
+            for word in words:
+                k_duration = int(word_duration * 100)
+                karaoke_text += f"{{\\k{k_duration}}}{word} "
+            
+            style = "Emphasis" if seg.segment.segment_type == "hook" else "Default"
+            start = self._format_time(seg.start_time)
+            end = self._format_time(seg.end_time)
+            
+            lines.append(f"Dialogue: 0,{start},{end},{style},,0,0,0,,{karaoke_text.strip()}")
+        
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         return ass_path
+    
+    def _format_time(self, seconds: float) -> str:
+        """Format seconds to ASS time (H:MM:SS.cc)."""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds % 60
+        return f"{hours}:{minutes:02d}:{secs:05.2f}"
 
 # =============================================================================
-# 2. RESEARCH MODULE (Tavily)
-# =============================================================================
-
-class ResearchAgent:
-    """Fetches fresh facts using Tavily Search API."""
-
-    CATEGORIES = ["psychology", "space", "weird_facts"]
-
-    QUERIES = {
-        "psychology": [
-            "mind blowing psychology facts human behavior 2026",
-            "psychology tricks brain facts hindi",
-            "interesting psychological phenomena daily life",
-        ],
-        "space": [
-            "amazing space facts universe secrets 2026",
-            "space discoveries recent mind blowing",
-            "astronomy facts that will blow your mind",
-        ],
-        "weird_facts": [
-            "unbelievable facts about world strange but true",
-            "weird facts that sound fake but are true",
-            "amazing facts about earth animals humans",
-        ],
-    }
-
-    FALLBACK_FACTS = {
-        "psychology": {
-            "title": "Psychology Facts That Will Blow Your Mind",
-            "content": "Your brain processes images in 13 milliseconds. The placebo effect works even when patients know they're taking a placebo. Decisions are 90% subconscious. Smiling tricks your brain into feeling happier.",
-            "category": "psychology",
-        },
-        "space": {
-            "title": "Space Secrets You Never Knew",
-            "content": "A day on Venus is longer than its year. Neutron stars spin 600 times per second. There are more trees on Earth than stars in the Milky Way. A space cloud is made of alcohol worth trillions.",
-            "category": "space",
-        },
-        "weird_facts": {
-            "title": "Weird Facts That Sound Fake",
-            "content": "Honey never spoils. Wombat poop is cube-shaped. Bananas are berries, strawberries aren't. Octopuses have three hearts and blue blood.",
-            "category": "weird_facts",
-        },
-    }
-
-    def __init__(self):
-        self.api_key = Config.TAVILY_API_KEY
-        self.base_url = "https://api.tavily.com/search"
-
-    def fetch_fact(self, category: Optional[str] = None) -> Dict:
-        """Fetch a fresh fact topic. Avoids recently-used titles."""
-        if not category:
-            category = Config.CATEGORY_OVERRIDE or random.choice(self.CATEGORIES)
-
-        recent_titles = [h.get("title", "") for h in load_history()[-15:]]
-        queries = self.QUERIES.get(category, self.QUERIES["weird_facts"])
-
-        for query in queries:
-            fact = self._try_query(category, query)
-            if fact and not any(recent.lower() in fact.get("title", "").lower() for recent in recent_titles):
-                return fact
-
-        # Last resort: pick a random fallback that wasn't used recently
-        cat = category if category in self.FALLBACK_FACTS else random.choice(self.CATEGORIES)
-        return dict(self.FALLBACK_FACTS[cat])
-
-    def _try_query(self, category: str, query: str) -> Optional[Dict]:
-        try:
-            payload = {
-                "api_key": self.api_key,
-                "query": query,
-                "search_depth": "advanced",
-                "include_answer": True,
-                "max_results": 5,
-            }
-            resp = requests.post(self.base_url, json=payload, timeout=30)
-            data = resp.json()
-            results = data.get("results", [])
-            if results:
-                best = max(results, key=lambda x: len(x.get("content", "")))
-                return {
-                    "category": category,
-                    "title": best.get("title", ""),
-                    "content": best.get("content", ""),
-                    "url": best.get("url", ""),
-                    "query": query,
-                    "ai_answer": data.get("answer", ""),
-                }
-        except Exception as e:
-            print(f"Research error: {e}")
-        return None
-
-
-# =============================================================================
-# 3. SCRIPT GENERATION (Groq/LLaMA)
-# =============================================================================
-
-class ScriptAgent:
-    """Generates structured Hinglish scripts using Groq LLaMA."""
-
-    SYSTEM_PROMPT = """You are a professional YouTube Shorts scriptwriter for "Ajeebology Shorts".
-Your scripts are in HINGLISH (Roman Hindi + English mix), engaging, fast-paced, and optimized for retention.
-
-RULES:
-1. Write in Hinglish (Roman script Hindi mixed with English words)
-2. Target 50-55 seconds when spoken naturally (NEVER exceed 60s)
-3. HOOK must grab attention in first 2 seconds (use curiosity gap or shocking claim)
-4. Each FACT must be mind-blowing and concise (max 12 words)
-5. Every 8-10 seconds introduce an OPEN LOOP ("but here's the crazy part...", "wait till you hear this")
-6. OUTRO must have a strong CTA (subscribe, comment, share)
-7. Mark EMPHASIS words with [WORD] brackets (max 2 per segment)
-8. Keep sentences short and punchy (one idea per line in script)
-9. Conversational tone like talking to a friend
-10. NEVER repeat a topic from previous videos
-
-OUTPUT FORMAT: Return ONLY valid JSON with this structure:
-{
-    "title": "Hinglish title under 60 chars",
-    "category": "psychology|space|weird_facts",
-    "seo_title": "English SEO title with primary keyword",
-    "description": "English description 100-150 words with keywords",
-    "tags": ["tag1", "tag2", ...15 tags],
-    "hashtags": ["#tag1", "#tag2", ...10 hashtags],
-    "segments": [
-        {"type": "hook", "text": "Hinglish with [emphasis] words", "broll_prompt": "english search prompt"},
-        {"type": "fact1", "text": "...", "broll_prompt": "..."},
-        {"type": "fact2", "text": "...", "broll_prompt": "..."},
-        {"type": "fact3", "text": "...", "broll_prompt": "..."},
-        {"type": "outro", "text": "...", "broll_prompt": "..."}
-    ]}"""
-
-    HOOK_STYLES = [
-        "Start with a direct question that creates curiosity gap",
-        "Start with an impossible-sounding claim, then prove it",
-        "Start with 'What if I told you...' pattern",
-        "Start with a shocking statistic in round numbers",
-        "Start with a controversial take that challenges common belief",
-    ]
-
-    def __init__(self):
-        self.api_key = Config.GROQ_API_KEY
-        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
-        self.model = "llama-3.3-70b-versatile"
-
-    def generate_script(self, research_data: Dict) -> VideoScript:
-        """Generate complete video script from research."""
-        hook_style = random.choice(self.HOOK_STYLES)
-
-        user_prompt = f"""Create a viral YouTube Shorts script.
-
-Category: {research_data['category']}
-Topic: {research_data['title']}
-Research: {research_data['content']}
-
-HOOK STYLE TO USE: {hook_style}
-
-Audience: Hinglish speakers aged 16-30. Keep segments SHORT for fast pacing.
-CRITICAL: Total spoken duration MUST be 50-55 seconds. Count words: ~140-160 total words."""
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.85,
-            "max_tokens": 1800,
-            "response_format": {"type": "json_object"},
-        }
-
-        try:
-            resp = requests.post(self.base_url, json=payload, headers=headers, timeout=60)
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            script_data = json.loads(content)
-
-            # Retry if title was recently used
-            for _ in range(2):
-                if not was_title_used(script_data.get("title", "")):
-                    break
-                resp = requests.post(self.base_url, json=payload, headers=headers, timeout=60)
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                script_data = json.loads(content)
-
-            return self._parse_script(script_data)
-        except Exception as e:
-            print(f"Script generation error: {e}")
-            return self._fallback_script(research_data)
-
-    def _parse_script(self, data: Dict) -> VideoScript:
-        """Parse JSON into VideoScript object."""
-        segments = []
-        for seg_data in data.get("segments", []):
-            text = seg_data.get("text", "")
-            emphasis = re.findall(r"\[(.*?)\]", text)
-            clean_text = re.sub(r"\[(.*?)\]", r"\1", text)
-
-            segments.append(
-                ScriptSegment(
-                    text=clean_text,
-                    segment_type=seg_data.get("type", "fact"),
-                    emphasis_words=emphasis,
-                    broll_prompt=seg_data.get("broll_prompt", ""),
-                )
-            )
-
-        return VideoScript(
-            title=data.get("title", "Amazing Facts"),
-            category=data.get("category", "weird_facts"),
-            seo_title=data.get("seo_title", "Mind Blowing Facts You Need To Know"),
-            description=data.get("description", ""),
-            tags=data.get("tags", []),
-            hashtags=data.get("hashtags", []),
-            segments=segments,
-        )
-
-    def _fallback_script(self, research: Dict) -> VideoScript:
-        """Generate fallback script if API fails."""
-        category = research.get("category", "weird_facts")
-        templates = {
-            "psychology": [
-                ScriptSegment("Kya aap jaante hain aapka brain har [13 milliseconds] mein ek image process kar sakta hai?", "hook", ["13 milliseconds"], "human brain neural pathways"),
-                ScriptSegment("Psychology ke ek experiment mein researchers ne dekha ki [false memories] create karna kitna aasan hai.", "fact1", ["false memories"], "psychology experiment memory"),
-                ScriptSegment("Agar aap forcefully [smile] karte hain, toh aapka brain automatically [happy hormones] release kar deta hai.", "fact2", ["smile"], "person smiling happiness"),
-                ScriptSegment("Aur ek study ke mutabik, aapke decisions ka [90%] subconscious mind control karta hai.", "fact3", ["90%"], "subconscious mind brain"),
-                ScriptSegment("Agar ye facts pasand aaye toh [subscribe] karo aur comments mein batao aapko kaunsa fact sabse zyada shocking laga!", "outro", ["subscribe"], "youtube subscribe button"),
-            ],
-            "space": [
-                ScriptSegment("Venus par ek din [243 Earth days] ka hota hai, lekin saal sirf [225 days] ka!", "hook", ["243 Earth days"], "venus planet space"),
-                ScriptSegment("Neutron stars itni tezi se spin karti hain ki ek second mein [600 baar] ghoom jaati hain.", "fact1", ["600 baar"], "neutron star spinning"),
-                ScriptSegment("Aur Earth par trees [Milky Way] ke stars se zyada hain!", "fact2", ["Milky Way"], "milky way galaxy stars"),
-                ScriptSegment("Space mein ek [giant cloud] hai jo alcohol se bana hai, jiski value [1000 trillion dollars] hai.", "fact3", ["giant cloud"], "space nebula cloud"),
-                ScriptSegment("Aur bhi amazing space facts ke liye [follow] karo Ajeebology Shorts ko!", "outro", ["follow"], "space astronaut earth"),
-            ],
-            "weird_facts": [
-                ScriptSegment("Honey kabhi [spoil] nahi hota, archaeologists ne [3000 saal] purana honey khaya tha!", "hook", ["spoil", "3000 saal"], "honey jar ancient"),
-                ScriptSegment("Wombat ka poop [cube-shaped] hota hai, nature ka sabse weird phenomenon!", "fact1", ["cube-shaped"], "wombat animal australia"),
-                ScriptSegment("Banana technically ek [berry] hai, lekin strawberry nahi!", "fact2", ["berry"], "banana fruit close up"),
-                ScriptSegment("Octopus ke paas [teen dil] hain aur unka blood [blue] hota hai!", "fact3", ["teen dil"], "octopus underwater ocean"),
-                ScriptSegment("Aise hi [mind-blowing] facts ke liye channel ko subscribe karo!", "outro", ["mind-blowing"], "shocked surprised face"),
-            ],
-        }
-        segs = templates.get(category, templates["weird_facts"])
-        return VideoScript(
-            title=research.get("title", "Amazing Facts"),
-            category=category,
-            seo_title=f"Mind Blowing {category.title()} Facts You Need To Know 2026",
-            description=f"Amazing {category} facts in Hinglish. Subscribe for daily mind-blowing content!",
-            tags=[category, "facts", "hinglish", "shorts", "viral"],
-            hashtags=[f"#{category}", "#facts", "#shorts", "#viral", "#hinglish"],
-            segments=segs,
-    )
-
-
-# =============================================================================
-# 4. VOICE GENERATION (edge-tts async, with WordBoundary extraction)
-# =============================================================================
-
-class VoiceAgent:
-    """Generates male Hindi voiceover using edge-tts. Captures per-word timings."""
-
-    def __init__(self):
-        self.voice_primary = Config.VOICE_MODEL
-        self.voice_fallback = Config.VOICE_FALLBACK
-
-    async def _tts_with_timings(self, text: str, voice: str, out_path: str) -> List[WordTiming]:
-        """Async edge-tts call that captures WordBoundary events for karaoke timing."""
-        word_timings: List[WordTiming] = []
-        communicate = edge_tts.Communicate(text, voice, rate="+8%")
-        with open(out_path, "wb") as f:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-                elif chunk["type"] == "WordBoundary":
-                    # offset is in 100-ns units (ticks)
-                    start = chunk["offset"] / 10_000_000.0
-                    duration = chunk["duration"] / 10_000_000.0
-                    word_text = chunk["text"].strip()
-                    if word_text:
-                        word_timings.append(WordTiming(
-                            text=word_text,
-                            start=start,
-                            end=start + duration,
-                        ))
-        return word_timings
-
-    async def _generate_segment(self, segment: ScriptSegment, idx: int, voice: str) -> AudioSegment:
-        """Generate one segment's audio + word timings."""
-        tts_text = self._clean_for_tts(segment.text)
-        output_path = str(Config.AUDIO_DIR / f"segment_{idx:02d}.mp3")
-        try:
-            word_timings = await self._tts_with_timings(tts_text, voice, output_path)
-        except Exception as e:
-            print(f"edge-tts error: {e}")
-            word_timings = []
-
-        if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
-            duration = self._estimate_duration(segment.text)
-            self._create_silent_audio(output_path, duration)
-            word_timings = self._estimate_word_timings(segment.text, duration)
-
-        duration = get_audio_duration(output_path)
-        return AudioSegment(
-            segment=segment,
-            audio_path=output_path,
-            duration=duration,
-            start_time=0.0,
-            end_time=duration,
-            word_timings=word_timings,
-        )
-
-    def generate_voice(self, script: VideoScript) -> List[AudioSegment]:
-        """Generate voice for all segments in parallel (async). Falls back to alt voice on failure."""
-        async def _run_all():
-            tasks = [
-                self._generate_segment(seg, i, self.voice_primary)
-                for i, seg in enumerate(script.segments)
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            # fallback for any that failed
-            for i, res in enumerate(results):
-                if isinstance(res, Exception) or res is None:
-                    print(f"Segment {i} failed with primary voice, retrying with fallback")
-                    try:
-                        results[i] = await self._generate_segment(
-                            script.segments[i], i, self.voice_fallback
-                        )
-                    except Exception as e:
-                        print(f"Fallback also failed for segment {i}: {e}")
-                        results[i] = self._synthetic_segment(script.segments[i], i)
-            return results
-
-        segments = asyncio.run(_run_all())
-
-        # adjust start/end times and add small pause after hook
-        current = 0.0
-        for seg in segments:
-            if seg is None:
-                continue
-            seg.start_time = current
-            seg.end_time = current + seg.duration
-            current = seg.end_time
-            if seg.segment.segment_type == "hook":
-                current += 0.25  # small dramatic pause
-
-        script.total_duration_estimate = current
-
-        # enforce Shorts duration cap
-        if current > Config.MAX_DURATION:
-            print(f"Voice total {current:.1f}s exceeds {Config.MAX_DURATION}s cap, trimming last segment")
-            last = segments[-1]
-            allowed = Config.MAX_DURATION - last.start_time
-            if allowed > 1.5:
-                last.audio_path = trim_audio_to_max(last.audio_path, allowed)
-                last.duration = get_audio_duration(last.audio_path)
-                last.end_time = last.start_time + last.duration
-                # rescale word timings to new duration
-                if last.word_timings and last.duration > 0:
-                    orig = last.word_timings[-1].end
-                    ratio = last.duration / orig if orig > 0 else 1.0
-                    last.word_timings = [
-                        WordTiming(wt.text, wt.start * ratio, wt.end * ratio)
-                        for wt in last.word_timings
-                    ]
-
-        return [s for s in segments if s is not None]
-
-    def _clean_for_tts(self, text: str) -> str:
-        text = re.sub(r"[!]{2,}", "!", text)
-        text = re.sub(r"[?]{2,}", "?", text)
-        return text.strip()
-
-    def _estimate_duration(self, text: str) -> float:
-        return max(2.0, len(text) / 4.5)
-
-    def _estimate_word_timings(self, text: str, duration: float) -> List[WordTiming]:
-        words = text.split()
-        if not words:
-            return []
-        per_word = duration / len(words)
-        return [WordTiming(w, i * per_word, (i + 1) * per_word) for i, w in enumerate(words)]
-
-    def _create_silent_audio(self, path: str, duration: float):
-        cmd = [
-            "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
-            "-t", str(duration), "-acodec", "libmp3lame", "-q:a", "4", path,
-        ]
-        run_command(cmd)
-
-    def _synthetic_segment(self, segment: ScriptSegment, idx: int) -> AudioSegment:
-        duration = self._estimate_duration(segment.text)
-        path = str(Config.AUDIO_DIR / f"segment_{idx:02d}.mp3")
-        self._create_silent_audio(path, duration)
-        return AudioSegment(
-            segment=segment,
-            audio_path=path,
-            duration=duration,
-            start_time=0.0,
-            end_time=duration,
-            word_timings=self._estimate_word_timings(segment.text, duration),
-        )
-
-    def mix_audio(self, audio_segments: List[AudioSegment], bg_music_path: Optional[str] = None) -> str:
-        """Concatenate voice segments then duck-mix with background music."""
-        concat_list = Config.AUDIO_DIR / "concat_list.txt"
-        with open(concat_list, "w") as f:
-            for seg in audio_segments:
-                f.write(f"file '{seg.audio_path}'\n")
-
-        voice_path = str(Config.AUDIO_DIR / "voice_only.mp3")
-        cmd = [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", str(concat_list),
-            "-acodec", "libmp3lame", "-q:a", "2",
-            voice_path,
-        ]
-        run_command(cmd, timeout=120)
-
-        if not bg_music_path or not os.path.exists(bg_music_path):
-            return voice_path
-
-        final_path = str(Config.AUDIO_DIR / "final_audio.mp3")
-        # sidechaincompress ducks the bg music while voice plays (proper mixing)
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", voice_path,
-            "-stream_loop", "-1", "-i", bg_music_path,
-            "-filter_complex",
-            "[1:a]volume=0.20,sidechaincompress=threshold=0.05:ratio=8:attack=5:release=400[bg];"
-            "[0:a][bg]amix=inputs=2:duration=first:dropout_transition=0[aout]",
-            "-map", "[aout]",
-            "-acodec", "libmp3lame", "-q:a", "2",
-            final_path,
-        ]
-        rc, _, err = run_command(cmd, timeout=120)
-        if rc == 0 and os.path.exists(final_path):
-            return final_path
-        print(f"audio mix fallback: {err}")
-        return voice_path
-
-
-# =============================================================================
-# 5. B-ROLL & ASSETS
-# =============================================================================
-
-class AssetAgent:
-    """Downloads B-roll images, video clips, and music. Tries multiple sources with fallbacks."""
-
-    MUSIC_URLS = [
-        "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
-        "https://cdn.pixabay.com/download/audio/2022/03/15/audio_c8c8a73467.mp3",
-        "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3",
-    ]
-
-    def __init__(self):
-        self.assets: List[str] = []
-
-    def fetch_broll(self, prompt: str, index: int) -> Optional[str]:
-        """Fetch B-roll image. Try Unsplash → Pollinations → Pexels → procedural fallback."""
-        safe_prompt = safe_filename(prompt)[:30]
-        dest_path = str(Config.ASSETS_DIR / f"broll_{index:02d}_{safe_prompt}.jpg")
-
-        if Config.UNSPLASH_ACCESS_KEY:
-            if self._try_unsplash(prompt, dest_path):
-                return dest_path
-
-        if Config.POLLINATIONS_ENABLED:
-            if self._try_pollinations(prompt, dest_path):
-                return dest_path
-
-        if Config.PEXELS_API_KEY:
-            if self._try_pexels(prompt, dest_path):
-                return dest_path
-
-        # procedural fallback — gradient with text overlay
-        return self._procedural_broll(dest_path, prompt, index)
-
-    def _try_unsplash(self, prompt: str, dest: str) -> bool:
-        try:
-            url = f"https://api.unsplash.com/search/photos?query={quote_plus(prompt)}&per_page=5&orientation=portrait"
-            headers = {"Authorization": f"Client-ID {Config.UNSPLASH_ACCESS_KEY}"}
-            resp = requests.get(url, headers=headers, timeout=15)
-            data = resp.json()
-            results = data.get("results", [])
-            if results:
-                return download_file(results[0]["urls"]["regular"], dest)
-        except Exception as e:
-            print(f"Unsplash error: {e}")
-        return False
-
-    def _try_pollinations(self, prompt: str, dest: str) -> bool:
-        try:
-            enhanced = f"professional stock photo, {prompt}, high quality, detailed, cinematic lighting"
-            encoded = quote_plus(enhanced)
-            url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&seed={random.randint(1, 10000)}&nologo=true"
-            return download_file(url, dest, timeout=45)
-        except Exception as e:
-            print(f"Pollinations error: {e}")
-        return False
-
-    def _try_pexels(self, prompt: str, dest: str) -> bool:
-        try:
-            url = f"https://api.pexels.com/v1/search?query={quote_plus(prompt)}&per_page=5&orientation=portrait"
-            headers = {"Authorization": Config.PEXELS_API_KEY}
-            resp = requests.get(url, headers=headers, timeout=15)
-            data = resp.json()
-            photos = data.get("photos", [])
-            if photos:
-                return download_file(photos[0]["src"]["portrait"], dest)
-        except Exception as e:
-            print(f"Pexels error: {e}")
-        return False
-
-    def _procedural_broll(self, dest: str, prompt: str, index: int) -> str:
-        """Last-resort B-roll: gradient with category-themed overlay."""
-        try:
-            img = Image.new("RGB", (Config.WIDTH, Config.HEIGHT), Config.COLOR_BG_DARK)
-            draw = ImageDraw.Draw(img)
-            for y in range(Config.HEIGHT):
-                ratio = y / Config.HEIGHT
-                r = int(10 + ratio * 30 + math.sin(index * 0.7) * 20)
-                g = int(5 + ratio * 20 + math.sin(index * 1.1) * 15)
-                b = int(25 + ratio * 60 + math.sin(index * 0.5) * 25)
-                draw.line([(0, y), (Config.WIDTH, y)], fill=(r, g, b))
-            img.save(dest, "JPEG", quality=85)
-            return dest
-        except Exception as e:
-            print(f"Procedural b-roll failed: {e}")
-            return dest
-
-    def fetch_background_music(self) -> Optional[str]:
-        """Try multiple Pixabay music URLs."""
-        dest = str(Config.ASSETS_DIR / "bg_music.mp3")
-        for url in self.MUSIC_URLS:
-            if download_file(url, dest):
-                return dest
-        return None
-
-    def fetch_sfx(self, sfx_type: str) -> Optional[str]:
-        """Download a sound effect (placeholder for future expansion)."""
-        return None
-
-# =============================================================================
-# 6. VIDEO RENDERING ENGINE (PIL + ffmpeg + burned ASS karaoke)
+# 6. VIDEO RENDERING ENGINE
 # =============================================================================
 
 class VideoEngine:
-    """Professional video rendering. Uses PIL for visuals, FFmpeg for final encode."""
-
+    """
+    Professional video renderer with animated backgrounds, b-roll overlays,
+    and karaoke captions burned via FFmpeg ASS filter (single-pass).
+    """
+    
     def __init__(self):
         self.width = Config.WIDTH
         self.height = Config.HEIGHT
         self.fps = Config.FPS
-
-        self.font_title = self._load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", Config.FONT_SIZE_TITLE)
-        self.font_body = self._load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", Config.FONT_SIZE_BODY)
-        self.font_small = self._load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", Config.FONT_SIZE_SMALL)
-
-        self.particles = self._init_particles(60)
-
-        # Cache pan direction per segment so Ken Burns doesn't jitter
-        self._segment_pan: Dict[int, Tuple[int, int]] = {}
-
+        self.font_title = load_font(Config.FONT_SIZE_TITLE)
+        self.font_body = load_font(Config.FONT_SIZE_BODY)
+        self.font_caption = load_font(Config.FONT_SIZE_CAPTION)
+        self.particles = self._init_particles(80)
         self.caption_engine = CaptionEngine()
-
-    def _load_font(self, path: str, size: int) -> ImageFont.FreeTypeFont:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            for alt in [
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-                "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-            ]:
-                try:
-                    return ImageFont.truetype(alt, size)
-                except Exception:
-                    continue
-            return ImageFont.load_default()
-
+    
     def _init_particles(self, count: int) -> List[Dict]:
-        return [
-            {
+        """Initialize floating particles."""
+        particles = []
+        for _ in range(count):
+            particles.append({
                 "x": random.randint(0, self.width),
                 "y": random.randint(0, self.height),
-                "size": random.randint(1, 4),
-                "speed": random.uniform(0.2, 1.5),
-                "opacity": random.randint(50, 200),
-                "phase": random.uniform(0, math.pi * 2),
-            }
-            for _ in range(count)
-        ]
-
+                "size": random.randint(2, 6),
+                "speed_x": random.uniform(-0.8, 0.8),
+                "speed_y": random.uniform(-0.5, -2.0),
+                "opacity": random.randint(80, 200),
+                "phase": random.uniform(0, math.pi * 2)
+            })
+        return particles
+    
     def _draw_gradient_background(self, draw: ImageDraw, frame_idx: int, total_frames: int):
+        """Draw animated gradient background."""
         progress = frame_idx / max(total_frames, 1)
-        hue_shift = progress * 0.3
-        for y in range(self.height):
+        for y in range(0, self.height, 4):
             ratio = y / self.height
-            r = int(10 + ratio * 20 + math.sin(hue_shift + ratio * 3) * 10)
-            g = int(5 + ratio * 15 + math.sin(hue_shift + ratio * 2) * 8)
-            b = int(25 + ratio * 40 + math.sin(hue_shift + ratio * 4) * 15)
-            draw.line([(0, y), (self.width, y)], fill=(r, g, b))
-
+            drift = math.sin(progress * math.pi * 2 + ratio * 3) * 0.15
+            
+            r = int(Config.COLOR_BG_DARK[0] + (Config.COLOR_BG_MID[0] - Config.COLOR_BG_DARK[0]) * ratio + drift * 40)
+            g = int(Config.COLOR_BG_DARK[1] + (Config.COLOR_BG_MID[1] - Config.COLOR_BG_DARK[1]) * ratio + drift * 20)
+            b = int(Config.COLOR_BG_DARK[2] + (Config.COLOR_BG_MID[2] - Config.COLOR_BG_DARK[2]) * ratio + drift * 60)
+            
+            r = max(0, min(255, r))
+            g = max(0, min(255, g))
+            b = max(0, min(255, b))
+            draw.line([(0, y), (self.width, y)], fill=(r, g, b), width=4)
+    
     def _draw_particles(self, draw: ImageDraw, frame_idx: int):
+        """Draw animated particles."""
         for p in self.particles:
-            p["y"] -= p["speed"]
-            p["x"] += math.sin(frame_idx * 0.02 + p["phase"]) * 0.5
-            if p["y"] < -10:
-                p["y"] = self.height + 10
-                p["x"] = random.randint(0, self.width)
-            twinkle = abs(math.sin(frame_idx * 0.05 + p["phase"]))
-            if int(p["opacity"] * twinkle) > 30:
-                draw.ellipse(
-                    [p["x"] - p["size"], p["y"] - p["size"], p["x"] + p["size"], p["y"] + p["size"]],
-                    fill=(200, 220, 255),
-                )
-
-    def _draw_progress_bar(self, draw: ImageDraw, frame_idx: int, total_frames: int):
-        progress = frame_idx / max(total_frames, 1)
-        bar_height = 8
-        bar_y = self.height - bar_height - 20
-        bar_width = self.width - 80
-        bar_x = 40
-        draw.rounded_rectangle(
-            [bar_x, bar_y, bar_x + bar_width, bar_y + bar_height],
-            radius=4, fill=(40, 40, 60),
-        )
-        fill_width = int(bar_width * progress)
-        if fill_width > 0:
-            draw.rounded_rectangle(
-                [bar_x, bar_y, bar_x + fill_width, bar_y + bar_height],
-                radius=4, fill=Config.COLOR_ACCENT,
-            )
-
-    def _draw_channel_badge(self, draw: ImageDraw, frame_idx: int):
-        pulse = abs(math.sin(frame_idx * 0.08))
-        dot_size = int(6 + pulse * 4)
-        badge_w = 200
-        badge_h = 44
-        badge_x = self.width // 2 - badge_w // 2
-        badge_y = 30
-        draw.rounded_rectangle(
-            [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
-            radius=22, fill=(20, 20, 40), outline=Config.COLOR_ACCENT, width=1,
-        )
-        dot_color = (255, 50, 50) if pulse > 0.5 else (255, 100, 100)
-        draw.ellipse(
-            [badge_x + 15, badge_y + badge_h // 2 - dot_size // 2,
-             badge_x + 15 + dot_size, badge_y + badge_h // 2 + dot_size // 2],
-            fill=dot_color,
-        )
-        draw.text(
-            (badge_x + 30, badge_y + badge_h // 2),
-            "AJEEBOLOGY SHORTS", font=self.font_small,
-            fill=Config.COLOR_TEXT, anchor="lm",
-        )
-
-    def _draw_subscribe_cta(self, draw: ImageDraw, frame_idx: int, total_frames: int):
-        progress = frame_idx / max(total_frames, 1)
-        if progress < 0.85:
-            return
-        slide_progress = (progress - 0.85) / 0.15
-        ease = slide_progress * slide_progress * (3 - 2 * slide_progress)
-        cta_y = int(self.height + 100 - ease * 180)
-        cta_w = 400
-        cta_h = 80
-        cta_x = self.width // 2 - cta_w // 2
-        for glow in range(15, 0, -3):
-            draw.rounded_rectangle(
-                [cta_x - glow, cta_y - glow, cta_x + cta_w + glow, cta_y + cta_h + glow],
-                radius=25, outline=Config.COLOR_ACCENT_2, width=2,
-            )
-        draw.rounded_rectangle(
-            [cta_x, cta_y, cta_x + cta_w, cta_y + cta_h],
-            radius=20, fill=Config.COLOR_ACCENT_2, outline=(255, 255, 255), width=2,
-        )
-        bounce = abs(math.sin(frame_idx * 0.15)) * 3
-        draw.text(
-            (self.width // 2, cta_y + cta_h // 2 + bounce),
-            "SUBSCRIBE KARO!", font=self.font_body, fill=(255, 255, 255), anchor="mm",
-        )
-
+            px = (p["x"] + p["speed_x"] * frame_idx) % self.width
+            py = (p["y"] + p["speed_y"] * frame_idx) % self.height
+            pulse = 0.5 + 0.5 * math.sin(frame_idx * 0.05 + p["phase"])
+            alpha = int(p["opacity"] * pulse)
+            size = int(p["size"] * (0.8 + 0.4 * pulse))
+            color = (Config.COLOR_ACCENT[0], Config.COLOR_ACCENT[1], Config.COLOR_ACCENT[2])
+            draw.ellipse([px - size, py - size, px + size, py + size], fill=color)
+    
+    def _draw_text_with_glow(self, draw: ImageDraw, text: str, font, x: int, y: int,
+                              color: Tuple[int, int, int], glow_radius: int = 3):
+        """Draw text with subtle glow outline."""
+        for r in range(glow_radius, 0, -1):
+            alpha = int(40 + (glow_radius - r) * 30)
+            glow_color = (color[0], color[1], color[2])
+            draw.text((x, y), text, font=font, fill=glow_color)
+        draw.text((x, y), text, font=font, fill=color)
+    
+    def _wrap_text(self, text: str, font, max_width: int) -> List[str]:
+        """Wrap text to fit max width."""
+        words = text.split()
+        lines = []
+        current_line = []
+        for word in words:
+            test = " ".join(current_line + [word])
+            bbox = font.getbbox(test)
+            if bbox and (bbox[2] - bbox[0]) > max_width and current_line:
+                lines.append(" ".join(current_line))
+                current_line = [word]
+            else:
+                current_line.append(word)
+        if current_line:
+            lines.append(" ".join(current_line))
+        return lines if lines else [text]
+    
+    def _draw_rounded_card(self, draw: ImageDraw, bbox: List[int], radius: int,
+                            fill: Tuple[int, int, int], outline: Optional[Tuple[int, int, int]] = None):
+        """Draw rounded rectangle card."""
+        draw.rounded_rectangle(bbox, radius=radius, fill=fill, outline=outline, width=2)
+    
     def _apply_ken_burns(self, img: Image.Image, frame_idx: int, segment_frames: int,
-                         zoom_start: float, zoom_end: float, pan_x: float, pan_y: float) -> Image.Image:
-        """Smooth Ken Burns with FIXED pan direction (no per-frame jitter)."""
-        progress = frame_idx / max(segment_frames, 1)
-        t = progress
-        ease = t * t * (3 - 2 * t)
-        zoom = zoom_start + (zoom_end - zoom_start) * ease
-
-        new_w = int(self.width / zoom)
-        new_h = int(self.height / zoom)
-
-        offset_x = int(pan_x * ease * (self.width - new_w))
-        offset_y = int(pan_y * ease * (self.height - new_h))
-
-        left = max(0, (self.width - new_w) // 2 + offset_x)
-        top = max(0, (self.height - new_h) // 2 + offset_y)
-        right = min(img.width, left + new_w)
-        bottom = min(img.height, top + new_h)
-
-        if right - left < 10 or bottom - top < 10:
-            return img.resize((self.width, self.height), Image.Resampling.LANCZOS)
-        return img.crop((left, top, right, bottom)).resize((self.width, self.height), Image.Resampling.LANCZOS)
-
-    def _draw_broll_overlay(self, base_img: Image.Image, broll_path: str,
-                            frame_idx: int, segment_frames: int, segment_idx: int,
-                            overlay_mode: str = "full") -> Image.Image:
-        """Overlay B-roll with effects. Pan direction picked ONCE per segment (cached)."""
-        try:
-            broll = Image.open(broll_path).convert("RGB")
-        except Exception:
-            return base_img
-
-        # FIXED pan per segment (not random per frame)
-        if segment_idx not in self._segment_pan:
-            self._segment_pan[segment_idx] = (
-                random.choice([-1, 1]) * 0.10,
-                random.choice([-1, 1]) * 0.05,
+                          mode: str = "full") -> Image.Image:
+        """Apply Ken Burns effect to b-roll."""
+        if segment_frames < 2:
+            return img
+        progress = frame_idx / segment_frames
+        
+        if mode == "zoom_in":
+            scale = 1.0 + 0.15 * progress
+        elif mode == "zoom_out":
+            scale = 1.15 - 0.15 * progress
+        else:
+            scale = 1.0 + 0.08 * math.sin(progress * math.pi)
+        
+        new_w = int(img.width * scale)
+        new_h = int(img.height * scale)
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
+        pan_x = int((new_w - self.width) * 0.5 * (1 + 0.3 * math.sin(progress * math.pi * 2)))
+        pan_y = int((new_h - self.height) * 0.5 * (1 + 0.2 * math.cos(progress * math.pi * 2)))
+        
+        left = max(0, min(pan_x, new_w - self.width))
+        top = max(0, min(pan_y, new_h - self.height))
+        return img.crop((left, top, left + self.width, top + self.height))
+    
+    def _draw_progress_bar(self, draw: ImageDraw, frame_idx: int, total_frames: int):
+        """Draw sleek progress bar at bottom."""
+        bar_y = self.height - 20
+        bar_height = 8
+        progress = frame_idx / max(total_frames, 1)
+        
+        draw.rounded_rectangle(
+            [40, bar_y, self.width - 40, bar_y + bar_height],
+            radius=4, fill=(40, 30, 60)
+        )
+        progress_width = int((self.width - 80) * progress)
+        if progress_width > 0:
+            draw.rounded_rectangle(
+                [40, bar_y, 40 + progress_width, bar_y + bar_height],
+                radius=4, fill=Config.COLOR_ACCENT
             )
-        pan_x, pan_y = self._segment_pan[segment_idx]
-
-        broll = self._apply_ken_burns(broll, frame_idx, segment_frames,
-                                       zoom_start=1.0, zoom_end=1.12,
-                                       pan_x=pan_x, pan_y=pan_y)
-
-        if overlay_mode == "full":
-            overlay = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
-            overlay.paste(broll.resize((self.width, self.height)))
-            overlay = ImageEnhance.Brightness(overlay).enhance(0.4)
-            base_img = Image.alpha_composite(base_img.convert("RGBA"), overlay)
-            return base_img.convert("RGB")
-        elif overlay_mode == "split":
-            broll_resized = broll.resize((self.width, self.height // 2))
-            base_img.paste(broll_resized, (0, 0))
-            for y in range(self.height // 2 - 100, self.height // 2):
-                for x in range(self.width):
-                    base_img.putpixel((x, y), (10, 5, 25))
+    
+    def _draw_channel_badge(self, draw: ImageDraw, frame_idx: int):
+        """Draw channel badge in top corner."""
+        badge_text = "AjeebOology"
+        font = load_font(32)
+        bbox = font.getbbox(badge_text)
+        if not bbox:
+            return
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        
+        x = self.width - text_w - 30
+        y = 30
+        
+        padding = 12
+        self._draw_rounded_card(
+            draw,
+            [x - padding, y - padding, x + text_w + padding, y + text_h + padding],
+            radius=20, fill=(20, 10, 40), outline=Config.COLOR_ACCENT
+        )
+        draw.text((x, y), badge_text, font=font, fill=Config.COLOR_TEXT)
+    
+    def _draw_subscribe_cta(self, draw: ImageDraw, frame_idx: int, total_frames: int):
+        """Draw subscribe CTA in last 8 seconds."""
+        current_time = frame_idx / self.fps
+        total_time = total_frames / self.fps
+        if current_time < total_time - 8:
+            return
+        
+        cta_text = "Subscribe for Daily Facts!"
+        font = load_font(44)
+        bbox = font.getbbox(cta_text)
+        if not bbox:
+            return
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        
+        x = (self.width - text_w) // 2
+        y = self.height - 180
+        
+        bounce = abs(math.sin((current_time - (total_time - 8)) * 4)) * 10
+        y -= int(bounce)
+        
+        self._draw_rounded_card(
+            draw,
+            [x - 20, y - 10, x + text_w + 20, y + text_h + 10],
+            radius=25, fill=Config.COLOR_ACCENT_2, outline=Config.COLOR_TEXT
+        )
+        draw.text((x, y), cta_text, font=font, fill=Config.COLOR_TEXT)
+    
+    def _draw_broll_overlay(self, base_img: Image.Image, broll_path: str,
+                             frame_idx: int, segment_frames: int, mode: str) -> Image.Image:
+        """Overlay b-roll with Ken Burns and darkening."""
+        if not broll_path or not os.path.exists(broll_path):
             return base_img
-        return base_img
+        
+        try:
+            ext = os.path.splitext(broll_path)[1].lower()
+            if ext in [".mp4", ".mov", ".avi"]:
+                seg_time = frame_idx / self.fps
+                cmd = [
+                    "ffmpeg", "-y", "-ss", str(seg_time), "-i", broll_path,
+                    "-vframes", "1", "-f", "image2", "-vcodec", "png", "-"
+                ]
+                rc, out, _ = run_command(cmd, timeout=15)
+                if rc == 0 and out:
+                    broll = Image.open(BytesIO(out)).convert("RGB")
+                else:
+                    return base_img
+            else:
+                broll = Image.open(broll_path).convert("RGB")
+            
+            broll = self._resize_to_cover(broll, self.width, self.height)
+            broll = self._apply_ken_burns(broll, frame_idx, segment_frames)
+            
+            enhancer = ImageEnhance.Brightness(broll)
+            broll = enhancer.enhance(0.45)
+            broll = self._apply_vignette(broll)
+            
+            if mode == "split":
+                mask = Image.new("L", (self.width, self.height), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.rectangle([0, 0, self.width, self.height // 2], fill=255)
+                mask_blur = mask.filter(ImageFilter.GaussianBlur(30))
+                base_img = Image.composite(broll, base_img, mask_blur)
+            else:
+                base_img = broll
+            
+            return base_img
+        except Exception as e:
+            print(f"B-roll overlay error: {e}")
+            return base_img
+    
+    def _resize_to_cover(self, img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+        """Resize image to cover target dimensions."""
+        img_ratio = img.width / img.height
+        target_ratio = target_w / target_h
+        
+        if img_ratio > target_ratio:
+            new_h = target_h
+            new_w = int(new_h * img_ratio)
+        else:
+            new_w = target_w
+            new_h = int(new_w / img_ratio)
+        
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        left = (new_w - target_w) // 2
+        top = (new_h - target_h) // 2
+        return img.crop((left, top, left + target_w, top + target_h))
+    
+    def _apply_vignette(self, img: Image.Image) -> Image.Image:
+        """Apply subtle vignette effect."""
+        w, h = img.size
+        x = np.linspace(-1, 1, w)
+        y = np.linspace(-1, 1, h)
+        X, Y = np.meshgrid(x, y)
+        R = np.sqrt(X**2 + Y**2)
+        mask = 1 - np.clip(R / 1.4, 0, 1) * 0.4
+        mask = (mask * 255).astype(np.uint8)
+        mask_img = Image.fromarray(mask, mode="L")
+        mask_img = mask_img.filter(ImageFilter.GaussianBlur(50))
+        
+        img_array = np.array(img)
+        mask_array = np.array(mask_img).reshape(h, w, 1) / 255.0
+        vignette = (img_array * mask_array).astype(np.uint8)
+        return Image.fromarray(vignette)
+
 
     def render_video(self, script: VideoScript, audio_segments: List[AudioSegment],
                      broll_paths: List[Optional[str]], final_audio_path: str) -> str:
-        """Two-pass render: PIL generates frames, FFmpeg encodes + burns karaoke ASS."""
+        """
+        Main video rendering with single-pass FFmpeg + ASS karaoke burn.
+        """
         total_duration = get_audio_duration(final_audio_path)
-        total_duration = min(total_duration, Config.MAX_DURATION)
         total_frames = int(total_duration * self.fps)
-
-        print(f"Rendering {total_frames} frames @ {self.fps} FPS, duration: {total_duration:.2f}s")
-
-        # Build karaoke ASS file using REAL word timings
+        
+        print(f"Rendering {total_frames} frames at {self.fps} FPS, duration: {total_duration:.2f}s")
+        
+        # Generate ASS karaoke file
         ass_path = self.caption_engine.build_ass_file(audio_segments)
-        print(f"Karaoke ASS: {ass_path}")
-
+        print(f"Karaoke ASS saved: {ass_path}")
+        
         # Pre-load b-roll images
         broll_images = {}
         for i, path in enumerate(broll_paths):
             if path and os.path.exists(path):
                 try:
-                    broll_images[i] = Image.open(path).convert("RGB")
-                except Exception:
-                    pass
-
-        # Generate frames to disk
-        for frame_idx in range(total_frames):
-            current_time = frame_idx / self.fps
-
-            active_seg_idx = -1
-            active_seg = None
-            for i, seg in enumerate(audio_segments):
-                if seg.start_time <= current_time < seg.end_time:
-                    active_seg_idx = i
-                    active_seg = seg
-                    break
-
-            frame = Image.new("RGB", (self.width, self.height), Config.COLOR_BG_DARK)
-            draw = ImageDraw.Draw(frame)
-            self._draw_gradient_background(draw, frame_idx, total_frames)
-            self._draw_particles(draw, frame_idx)
-
-            if active_seg_idx >= 0 and active_seg_idx in broll_images:
-                seg_frames = int((active_seg.end_time - active_seg.start_time) * self.fps)
-                rel_frame = max(0, frame_idx - int(active_seg.start_time * self.fps))
-                stype = active_seg.segment.segment_type
-                if stype == "hook":
-                    mode = "full"
-                elif stype in ("fact1", "fact2", "fact3"):
-                    mode = "split" if random.random() > 0.5 else "full"
-                else:
-                    mode = "full"
-
-                frame = self._draw_broll_overlay(
-                    frame, broll_paths[active_seg_idx], rel_frame,
-                    seg_frames, active_seg_idx, mode,
-                )
+                    if path.lower().endswith((".mp4", ".mov", ".avi")):
+                        broll_images[i] = None
+                    else:
+                        broll_images[i] = Image.open(path).convert("RGB")
+                except Exception as e:
+                    print(f"Failed to load broll {i}: {e}")
+        
+        # Render frames in batches
+        batch_size = 120
+        for batch_start in range(0, total_frames, batch_size):
+            batch_end = min(batch_start + batch_size, total_frames)
+            
+            for frame_idx in range(batch_start, batch_end):
+                current_time = frame_idx / self.fps
+                
+                # Find active segment
+                active_seg_idx = -1
+                active_seg = None
+                seg_progress = 0.0
+                for i, seg in enumerate(audio_segments):
+                    if seg.start_time <= current_time < seg.end_time:
+                        active_seg_idx = i
+                        active_seg = seg
+                        seg_dur = seg.end_time - seg.start_time
+                        seg_progress = (current_time - seg.start_time) / max(seg_dur, 0.1)
+                        break
+                
+                # Create frame
+                frame = Image.new("RGB", (self.width, self.height), Config.COLOR_BG_DARK)
                 draw = ImageDraw.Draw(frame)
-
-            # zoom punch on emphasis beats
-            if active_seg and active_seg.segment.emphasis_words:
-                seg_dur = active_seg.end_time - active_seg.start_time
-                beat_times = [
-                    active_seg.start_time + 0.5,
-                    active_seg.start_time + seg_dur * 0.5,
-                ]
-                for bt in beat_times:
-                    if abs(current_time - bt) < 0.15:
-                        beat = 1 - abs(current_time - bt) / 0.15
-                        zoom = 1 + 0.08 * beat
-                        new_size = (int(self.width * zoom), int(self.height * zoom))
-                        frame = frame.resize(new_size, Image.Resampling.LANCZOS)
-                        left = (new_size[0] - self.width) // 2
-                        top = (new_size[1] - self.height) // 2
-                        frame = frame.crop((left, top, left + self.width, top + self.height))
-                        draw = ImageDraw.Draw(frame)
-
-            self._draw_channel_badge(draw, frame_idx)
-            self._draw_progress_bar(draw, frame_idx, total_frames)
-            self._draw_subscribe_cta(draw, frame_idx, total_frames)
-
-            frame_path = Config.FRAMES_DIR / f"frame_{frame_idx:06d}.png"
-            frame.save(frame_path, "PNG")
-            if frame_idx % 100 == 0:
-                print(f"Frame {frame_idx}/{total_frames}")
-
+                
+                # 1. Animated gradient background
+                self._draw_gradient_background(draw, frame_idx, total_frames)
+                
+                # 2. Floating particles
+                self._draw_particles(draw, frame_idx)
+                
+                # 3. B-roll overlay
+                if active_seg_idx >= 0 and active_seg_idx in broll_images:
+                    seg_frames = int((active_seg.end_time - active_seg.start_time) * self.fps)
+                    rel_frame = frame_idx - int(active_seg.start_time * self.fps)
+                    mode = "full" if active_seg.segment.segment_type == "hook" else \
+                           ("split" if random.random() > 0.6 else "full")
+                    frame = self._draw_broll_overlay(
+                        frame, broll_paths[active_seg_idx], rel_frame, seg_frames, mode
+                    )
+                    draw = ImageDraw.Draw(frame)
+                
+                # 4. Audio-reactive zoom on emphasis beats
+                if active_seg and active_seg.segment.emphasis_words:
+                    beat_times = [
+                        active_seg.start_time + seg_progress * (active_seg.end_time - active_seg.start_time) * 0.3,
+                        active_seg.start_time + seg_progress * (active_seg.end_time - active_seg.start_time) * 0.7
+                    ]
+                    for bt in beat_times:
+                        if abs(current_time - bt) < 0.12:
+                            beat_p = 1 - abs(current_time - bt) / 0.12
+                            zoom = 1 + 0.06 * beat_p
+                            new_sz = (int(self.width * zoom), int(self.height * zoom))
+                            frame = frame.resize(new_sz, Image.Resampling.LANCZOS)
+                            l = (new_sz[0] - self.width) // 2
+                            t = (new_sz[1] - self.height) // 2
+                            frame = frame.crop((l, t, l + self.width, t + self.height))
+                            draw = ImageDraw.Draw(frame)
+                
+                # 5. Channel badge
+                self._draw_channel_badge(draw, frame_idx)
+                
+                # 6. Progress bar
+                self._draw_progress_bar(draw, frame_idx, total_frames)
+                
+                # 7. Subscribe CTA
+                self._draw_subscribe_cta(draw, frame_idx, total_frames)
+                
+                # Save frame
+                frame_path = Config.FRAMES_DIR / f"frame_{frame_idx:06d}.png"
+                frame.save(frame_path, "PNG")
+                
+                if frame_idx % 150 == 0:
+                    print(f"Rendered frame {frame_idx}/{total_frames}")
+        
+        # SINGLE-PASS FFmpeg: frames + audio + ASS subtitles
         output_path = str(Config.OUTPUT_DIR / "output_video.mp4")
-        temp_video = str(Config.OUTPUT_DIR / "temp_video_no_subs.mp4")
-
-        # Pass 1: encode frames + audio (no subs)
+        
         cmd = [
             "ffmpeg", "-y",
             "-framerate", str(self.fps),
             "-i", str(Config.FRAMES_DIR / "frame_%06d.png"),
             "-i", final_audio_path,
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-crf", "23", "-preset", "fast",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
-            "-t", str(total_duration),
+            "-vf", f"ass={ass_path}",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", "23",
+            "-preset", "fast",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-shortest",
             "-movflags", "+faststart",
-            temp_video,
+            output_path
         ]
-        rc, _, err = run_command(cmd, timeout=900)
+        
+        print("Compiling video with karaoke captions (single-pass)...")
+        rc, out, err = run_command(cmd, timeout=600)
         if rc != 0:
-            print(f"FFmpeg pass1 error, retrying ultrafast: {err}")
-            cmd[cmd.index("-preset") + 1] = "ultrafast"
-            cmd[cmd.index("-crf") + 1] = "28"
-            cmd[cmd.index("-b:a") + 1] = "128k"
-            run_command(cmd, timeout=900)
-
-        # Pass 2: burn karaoke ASS subtitles
-        print("Burning karaoke captions...")
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", temp_video,
-            "-vf", f"subtitles={ass_path}:fontsdir=/usr/share/fonts/truetype",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-crf", "23", "-preset", "fast",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            output_path,
-        ]
-        rc, _, err = run_command(cmd, timeout=300)
-        if rc != 0:
-            print(f"Subtitle burn failed, retrying without fontsdir: {err}")
-            cmd[cmd.index("-vf") + 1] = f"subtitles={ass_path}"
-            rc2, _, err2 = run_command(cmd, timeout=300)
-            if rc2 != 0:
-                print(f"Fallback failed: {err2}, copying video without subs")
-                shutil.copy(temp_video, output_path)
-
-        # cleanup
-        if os.path.exists(temp_video):
-            os.remove(temp_video)
+            print(f"FFmpeg error: {err}")
+            # Fallback: without ASS
+            cmd2 = [
+                "ffmpeg", "-y",
+                "-framerate", str(self.fps),
+                "-i", str(Config.FRAMES_DIR / "frame_%06d.png"),
+                "-i", final_audio_path,
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-crf", "23",
+                "-preset", "fast",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-shortest",
+                "-movflags", "+faststart",
+                output_path
+            ]
+            run_command(cmd2, timeout=600)
+        
+        # Cleanup frames
         for f in Config.FRAMES_DIR.glob("*.png"):
             f.unlink()
-
+        
         print(f"Final video: {output_path}")
         return output_path
+    
+    def generate_thumbnail(self, script: VideoScript) -> Optional[str]:
+        """Generate high-CTR thumbnail."""
+        try:
+            thumb = Image.new("RGB", (1280, 720), Config.COLOR_BG_DARK)
+            draw = ImageDraw.Draw(thumb)
+            
+            # Gradient background
+            for y in range(0, 720, 4):
+                ratio = y / 720
+                r = int(10 + 20 * ratio)
+                g = int(5 + 10 * ratio)
+                b = int(25 + 35 * ratio)
+                draw.line([(0, y), (1280, y)], fill=(r, g, b), width=4)
+            
+            # Title text (large, high contrast)
+            title = script.seo_title[:60]
+            font = load_font(72)
+            lines = self._wrap_text(title, font, 1100)
+            y_pos = 200
+            for line in lines[:2]:
+                bbox = font.getbbox(line)
+                if bbox:
+                    x = (1280 - (bbox[2] - bbox[0])) // 2
+                    for offset in [(3, 3), (-3, -3), (3, -3), (-3, 3)]:
+                        draw.text((x + offset[0], y_pos + offset[1]), line, font=font, fill=(0, 0, 0))
+                    draw.text((x, y_pos), line, font=font, fill=Config.COLOR_HIGHLIGHT)
+                    y_pos += 90
+            
+            # Channel watermark
+            font_sm = load_font(36)
+            draw.text((50, 650), "AjeebOology", font=font_sm, fill=Config.COLOR_ACCENT)
+            
+            # Accent bars
+            draw.rectangle([0, 0, 1280, 8], fill=Config.COLOR_ACCENT)
+            draw.rectangle([0, 712, 1280, 720], fill=Config.COLOR_ACCENT_2)
+            
+            thumb_path = str(Config.OUTPUT_DIR / "thumbnail.jpg")
+            thumb.save(thumb_path, "JPEG", quality=92)
+            return thumb_path
+        except Exception as e:
+            print(f"Thumbnail error: {e}")
+            return None
 
 # =============================================================================
 # 7. TELEGRAM DELIVERY
 # =============================================================================
 
 class TelegramAgent:
-    """Sends video and metadata via Telegram Bot. Reports success AND failure."""
-
     def __init__(self):
         self.token = Config.TELEGRAM_TOKEN
         self.chat_id = Config.TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.token}"
-
-    def send_video(self, video_path: str, script: VideoScript, artifact_url: str = "") -> bool:
+    
+    def send_video(self, video_path: str, script: VideoScript, thumb_path: Optional[str] = None):
+        """Send video to Telegram with metadata."""
         if not self.token or not self.chat_id:
             print("Telegram credentials not configured")
-            return False
-
-        caption = self._build_caption(script, artifact_url)
-        file_size = os.path.getsize(video_path)
-        max_size = 48 * 1024 * 1024
-
+            return
+        
+        caption = self._build_caption(script)
+        
         try:
-            if file_size <= max_size:
-                with open(video_path, "rb") as f:
-                    files = {"video": f}
-                    data = {
-                        "chat_id": self.chat_id,
-                        "caption": caption[:1024],
-                        "parse_mode": "HTML",
-                    }
+            with open(video_path, "rb") as vf:
+                files = {"video": vf}
+                data = {
+                    "chat_id": self.chat_id,
+                    "caption": caption[:1024],
+                    "parse_mode": "HTML"
+                }
+                if thumb_path and os.path.exists(thumb_path):
+                    with open(thumb_path, "rb") as tf:
+                        files["thumbnail"] = tf
+                        resp = requests.post(
+                            f"{self.base_url}/sendVideo",
+                            data=data, files=files, timeout=120
+                        )
+                else:
                     resp = requests.post(
-                        f"{self.base_url}/sendVideo", data=data, files=files, timeout=180
+                        f"{self.base_url}/sendVideo",
+                        data=data, files=files, timeout=120
                     )
-                    result = resp.json()
-                    if result.get("ok"):
-                        return True
-                    print(f"Telegram error: {result}")
-            else:
-                self._send_text(caption)
-                thumb = self._generate_thumbnail(script)
-                if thumb:
-                    with open(thumb, "rb") as f:
-                        files = {"photo": f}
-                        data = {
-                            "chat_id": self.chat_id,
-                            "caption": f"<b>{script.seo_title}</b>\n\nVideo too large. Download from artifacts.",
-                            "parse_mode": "HTML",
-                        }
-                        requests.post(f"{self.base_url}/sendPhoto", data=data, files=files, timeout=60)
+                if resp.status_code == 200:
+                    print("Video sent to Telegram successfully")
+                else:
+                    print(f"Telegram error: {resp.text}")
         except Exception as e:
             print(f"Telegram send error: {e}")
-        return False
-
-    def send_success(self, script: VideoScript, artifact_url: str):
-        """Quick success notification."""
-        msg = f"<b>✅ Ajeebology Video Ready</b>\n\n<b>{script.seo_title}</b>\nCategory: {script.category}\n\n<a href='{artifact_url}'>Download Artifact</a>"
-        self._send_text(msg)
-
-    def _build_caption(self, script: VideoScript, artifact_url: str) -> str:
-        tags_str = ", ".join(script.tags[:15])
-        hashtags_str = " ".join(script.hashtags[:10])
-        return (
-            f"<b>🎬 {script.seo_title}</b>\n\n"
-            f"<b>📋 Title:</b> {script.title}\n"
-            f"<b>📁 Category:</b> {script.category}\n\n"
-            f"<b>📝 Description:</b>\n{script.description}\n\n"
-            f"<b>🏷 Tags:</b>\n{tags_str}\n\n"
-            f"<b>#️⃣ Hashtags:</b>\n{hashtags_str}\n\n"
-            f"<b>📥 Download:</b> {artifact_url if artifact_url else 'GitHub Actions artifacts'}\n\n"
-            f"#AjeebologyShorts #YouTubeShorts #DailyFacts"
-        )
-
-    def _send_text(self, text: str):
-        try:
-            data = {
-                "chat_id": self.chat_id,
-                "text": text[:4096],
-                "parse_mode": "HTML",
-            }
-            requests.post(f"{self.base_url}/sendMessage", data=data, timeout=30)
-        except Exception as e:
-            print(f"Text send error: {e}")
-
-    def _generate_thumbnail(self, script: VideoScript) -> Optional[str]:
-        try:
-            img = Image.new("RGB", (1280, 720), Config.COLOR_BG_DARK)
-            draw = ImageDraw.Draw(img)
-            for y in range(720):
-                ratio = y / 720
-                draw.line(
-                    [(0, y), (1280, y)],
-                    fill=(int(10 + ratio * 30), int(5 + ratio * 20), int(25 + ratio * 50)),
-                )
-            font = self._load_font_thumbnail(80)
-            words = script.title.split()
-            lines, current = [], []
-            for word in words:
-                test = " ".join(current + [word])
-                bbox = font.getbbox(test)
-                if bbox and bbox[2] > 1200 and current:
-                    lines.append(" ".join(current))
-                    current = [word]
-                else:
-                    current.append(word)
-            if current:
-                lines.append(" ".join(current))
-
-            y = 360 - len(lines) * 50
-            for line in lines:
-                for offset in range(8, 0, -2):
-                    draw.text((640 + offset, y), line, font=font, fill=(0, 200, 200), anchor="mm")
-                    draw.text((640 - offset, y), line, font=font, fill=(0, 200, 200), anchor="mm")
-                draw.text((640, y), line, font=font, fill=(255, 255, 255), anchor="mm")
-                y += 100
-
-            font_small = self._load_font_thumbnail(40)
-            draw.text((640, 650), "@AjeebologyShorts", font=font_small,
-                      fill=Config.COLOR_ACCENT, anchor="mm")
-            path = str(Config.OUTPUT_DIR / "thumbnail.jpg")
-            img.save(path, "JPEG", quality=90)
-            return path
-        except Exception as e:
-            print(f"Thumbnail error: {e}")
-            return None
-
-    def _load_font_thumbnail(self, size: int):
-        for p in [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        ]:
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                continue
-        return ImageFont.load_default()
+    
+    def _build_caption(self, script: VideoScript) -> str:
+        """Build Telegram caption."""
+        lines = [
+            f"<b>{script.seo_title}</b>",
+            "",
+            f"Category: {script.category}",
+            f"Tags: {', '.join(script.tags[:5])}",
+            "",
+            "Hashtags:",
+            " ".join(script.hashtags[:8])
+        ]
+        return "\n".join(lines)
 
 
 # =============================================================================
-# 8. MAIN PIPELINE
+# 8. YOUTUBE UPLOAD AGENT
+# =============================================================================
+
+class YouTubeAgent:
+    def __init__(self):
+        self.client_secrets = Config.YOUTUBE_CLIENT_SECRETS
+    
+    def upload_video(self, video_path: str, script: VideoScript,
+                     thumb_path: Optional[str] = None) -> Optional[str]:
+        """Upload video to YouTube via Data API v3."""
+        if not self.client_secrets:
+            print("YouTube client secrets not configured, skipping upload")
+            return None
+        
+        try:
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+            import pickle
+            
+            creds = None
+            token_path = str(Config.BASE_DIR / "youtube_token.pickle")
+            if os.path.exists(token_path):
+                with open(token_path, "rb") as token:
+                    creds = pickle.load(token)
+            
+            if not creds or not creds.valid:
+                print("YouTube credentials not available or expired.")
+                print("Please run OAuth flow locally and upload token.pickle to secrets.")
+                return None
+            
+            youtube = build("youtube", "v3", credentials=creds)
+            
+            body = {
+                "snippet": {
+                    "title": script.seo_title[:100],
+                    "description": self._build_description(script),
+                    "tags": script.tags[:15],
+                    "categoryId": "24",
+                    "defaultLanguage": "hi",
+                    "defaultAudioLanguage": "hi"
+                },
+                "status": {
+                    "privacyStatus": "private",
+                    "selfDeclaredMadeForKids": False
+                }
+            }
+            
+            media = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
+            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+            
+            print("Uploading to YouTube...")
+            response = None
+            while response is None:
+                status, response = request.next_chunk()
+                if status:
+                    print(f"Upload progress: {int(status.progress() * 100)}%")
+            
+            video_id = response.get("id")
+            print(f"YouTube upload complete: https://youtu.be/{video_id}")
+            
+            if thumb_path and video_id:
+                try:
+                    youtube.thumbnails().set(
+                        videoId=video_id,
+                        media_body=MediaFileUpload(thumb_path, mimetype="image/jpeg")
+                    ).execute()
+                    print("Thumbnail uploaded")
+                except Exception as e:
+                    print(f"Thumbnail upload error: {e}")
+            
+            return video_id
+            
+        except ImportError:
+            print("google-api-python-client not installed, skipping YouTube upload")
+            return None
+        except Exception as e:
+            print(f"YouTube upload error: {e}")
+            return None
+    
+    def _build_description(self, script: VideoScript) -> str:
+        """Build YouTube description."""
+        lines = [
+            script.description,
+            "",
+            "Follow AjeebOology for daily mind-blowing facts!",
+            "",
+            "Hashtags:",
+            " ".join(script.hashtags),
+            "",
+            "Tags:",
+            ", ".join(script.tags)
+        ]
+        return "\n".join(lines)
+
+# =============================================================================
+# 9. MAIN PIPELINE
 # =============================================================================
 
 class AjeebologyPipeline:
-    """Orchestrates the full automation: Research → Script → Voice → Render → Deliver."""
-
     def __init__(self):
-        self.researcher = ResearchAgent()
-        self.script_writer = ScriptAgent()
-        self.voice_gen = VoiceAgent()
-        self.asset_fetcher = AssetAgent()
+        ensure_dirs()
+        self.script_agent = ScriptAgent()
+        self.research_agent = ResearchAgent()
+        self.voice_agent = VoiceAgent()
+        self.asset_agent = AssetAgent()
         self.video_engine = VideoEngine()
-        self.telegram = TelegramAgent()
-
-    def run(self) -> bool:
+        self.telegram_agent = TelegramAgent()
+        self.youtube_agent = YouTubeAgent()
+    
+    def run(self):
+        """Execute full pipeline."""
         print("=" * 60)
-        print("AJEEBOLOGY SHORTS - AUTOMATION PIPELINE")
+        print("AJEEBOLOGY SHORTS PIPELINE STARTED")
         print("=" * 60)
-
+        
         try:
-            setup_directories()
-
-            print("\n[1/7] Researching fresh facts...")
-            research_data = self.researcher.fetch_fact()
-            print(f"  Category: {research_data['category']}")
-            print(f"  Topic:    {research_data['title']}")
-
-            print("\n[2/7] Generating Hinglish script...")
-            script = self.script_writer.generate_script(research_data)
-            print(f"  Title:    {script.title}")
-            print(f"  Segments: {len(script.segments)}")
-
-            print("\n[3/7] Generating voiceover (async parallel)...")
-            audio_segments = self.voice_gen.generate_voice(script)
-            print(f"  Voice duration: {script.total_duration_estimate:.2f}s")
-
-            print("\n[4/7] Fetching B-roll and music...")
+            # Step 1: Research
+            print("\n[1/7] Researching trending topics...")
+            category = Config.CATEGORY_OVERRIDE or random.choice(["psychology", "space", "weird_facts"])
+            research = self.research_agent.research(category)
+            print(f"Research topic: {research.get('topic', category)}")
+            
+            # Step 2: Generate Script
+            print("\n[2/7] Generating script...")
+            script = self.script_agent.generate_script(research)
+            print(f"Title: {script.seo_title}")
+            print(f"Segments: {len(script.segments)}")
+            
+            # Step 3: Generate Voice
+            print("\n[3/7] Generating voice...")
+            audio_segments = self.voice_agent.generate_voice(script)
+            total_voice = sum(s.duration for s in audio_segments)
+            print(f"Total voice duration: {total_voice:.2f}s")
+            
+            # Step 4: Fetch Assets
+            print("\n[4/7] Fetching b-roll assets...")
             broll_paths = []
             for i, seg in enumerate(script.segments):
-                if seg.broll_prompt:
-                    path = self.asset_fetcher.fetch_broll(seg.broll_prompt, i)
+                if seg.broll_prompt and Config.BROLL_ENABLED:
+                    path = self.asset_agent.fetch_broll(seg.broll_prompt, i)
                     broll_paths.append(path)
-                    print(f"  {'✓' if path else '✗'} B-roll {i}: {seg.broll_prompt[:40]}")
+                    print(f"  Segment {i} ({seg.segment_type}): {'OK' if path else 'FAIL'}")
                 else:
                     broll_paths.append(None)
-
-            bg_music = self.asset_fetcher.fetch_background_music()
-            print(f"  {'✓' if bg_music else '✗'} Background music")
-
-            print("\n[5/7] Mixing audio (voice + ducked music)...")
-            final_audio = self.voice_gen.mix_audio(audio_segments, bg_music)
-            print(f"  Final audio: {final_audio}")
-
+            
+            print("Fetching background music...")
+            bg_music = self.asset_agent.fetch_background_music()
+            
+            # Step 5: Mix Audio
+            print("\n[5/7] Mixing audio with ducking...")
+            final_audio = self.voice_agent.mix_audio(audio_segments, bg_music)
+            final_duration = get_audio_duration(final_audio)
+            print(f"Final audio duration: {final_duration:.2f}s")
+            
+            # Step 6: Render Video
             print("\n[6/7] Rendering video with karaoke captions...")
-            video_path = self.video_engine.render_video(script, audio_segments, broll_paths, final_audio)
-            file_size = os.path.getsize(video_path) / (1024 * 1024)
-            print(f"  Video: {video_path} ({file_size:.2f} MB)")
-
-            print("\n[7/7] Sending to Telegram...")
-            run_id = os.environ.get("GITHUB_RUN_ID", "")
-            repo = os.environ.get("GITHUB_REPOSITORY", "")
-            artifact_url = f"https://github.com/{repo}/actions/runs/{run_id}" if run_id and repo else ""
-
-            sent = self.telegram.send_video(video_path, script, artifact_url)
-            if not sent:
-                self.telegram.send_success(script, artifact_url)
-
-            # save to history for dedup
-            save_history_entry({
-                "ts": time.time(),
-                "title": script.title,
-                "category": script.category,
-                "seo_title": script.seo_title,
-            })
-
+            video_path = self.video_engine.render_video(
+                script, audio_segments, broll_paths, final_audio
+            )
+            
+            print("Generating thumbnail...")
+            thumb_path = self.video_engine.generate_thumbnail(script)
+            
+            # Step 7: Deliver
+            print("\n[7/7] Delivering...")
+            self.telegram_agent.send_video(video_path, script, thumb_path)
+            
+            # YouTube upload (optional)
+            youtube_id = self.youtube_agent.upload_video(video_path, script, thumb_path)
+            
             print("\n" + "=" * 60)
-            print("✅ PIPELINE COMPLETED SUCCESSFULLY")
+            print("PIPELINE COMPLETE")
+            print(f"Video: {video_path}")
+            if youtube_id:
+                print(f"YouTube: https://youtu.be/{youtube_id}")
             print("=" * 60)
-            return True
-
+            
         except Exception as e:
-            print(f"\n❌ PIPELINE FAILED: {e}")
+            print(f"\nPIPELINE FAILED: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            sys.exit(1)
 
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
 
 if __name__ == "__main__":
     pipeline = AjeebologyPipeline()
-    success = pipeline.run()
-    sys.exit(0 if success else 1)
+    pipeline.run()
+          
