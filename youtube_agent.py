@@ -238,10 +238,8 @@ Return ONLY valid JSON."""
             tags=data.get("tags", []),
             hashtags=data.get("hashtags", ["#Shorts", "#AjeebOology"]),
             segments=segments
-        )
-
-
-    def _fallback_script(self, category: str) -> VideoScript:
+    )
+                            def _fallback_script(self, category: str) -> VideoScript:
         texts = {
             "psychology": [
                 "Kya aap jante hain ki aapka brain 70 percent waqt auto-pilot par rehta hai?",
@@ -558,8 +556,6 @@ class AssetAgent:
         ]
         rc, _, _ = run_command(cmd, timeout=15)
         return rc == 0 and os.path.exists(output_path)
-
-
 
 # =============================================================================
 # 5. KARAOKE CAPTION ENGINE (ASS Subtitles)
@@ -894,7 +890,6 @@ class VideoEngine:
         mask_array = np.array(mask_img).reshape(h, w, 1) / 255.0
         vignette = (img_array * mask_array).astype(np.uint8)
         return Image.fromarray(vignette)
-
 
     def render_video(self, script: VideoScript, audio_segments: List[AudioSegment],
                      broll_paths: List[Optional[str]], final_audio_path: str) -> str:
@@ -1244,6 +1239,102 @@ class YouTubeAgent:
         return "\n".join(lines)
 
 # =============================================================================
+# =============================================================================
+# 8. YOUTUBE UPLOAD AGENT
+# =============================================================================
+
+class YouTubeAgent:
+    def __init__(self):
+        self.client_secrets = Config.YOUTUBE_CLIENT_SECRETS
+    
+    def upload_video(self, video_path: str, script: VideoScript,
+                     thumb_path: Optional[str] = None) -> Optional[str]:
+        """Upload video to YouTube via Data API v3."""
+        if not self.client_secrets:
+            print("YouTube client secrets not configured, skipping upload")
+            return None
+        
+        try:
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+            import pickle
+            
+            creds = None
+            token_path = str(Config.BASE_DIR / "youtube_token.pickle")
+            if os.path.exists(token_path):
+                with open(token_path, "rb") as token:
+                    creds = pickle.load(token)
+            
+            if not creds or not creds.valid:
+                print("YouTube credentials not available or expired.")
+                print("Please run OAuth flow locally and upload token.pickle to secrets.")
+                return None
+            
+            youtube = build("youtube", "v3", credentials=creds)
+            
+            body = {
+                "snippet": {
+                    "title": script.seo_title[:100],
+                    "description": self._build_description(script),
+                    "tags": script.tags[:15],
+                    "categoryId": "24",
+                    "defaultLanguage": "hi",
+                    "defaultAudioLanguage": "hi"
+                },
+                "status": {
+                    "privacyStatus": "private",
+                    "selfDeclaredMadeForKids": False
+                }
+            }
+            
+            media = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
+            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+            
+            print("Uploading to YouTube...")
+            response = None
+            while response is None:
+                status, response = request.next_chunk()
+                if status:
+                    print(f"Upload progress: {int(status.progress() * 100)}%")
+            
+            video_id = response.get("id")
+            print(f"YouTube upload complete: https://youtu.be/{video_id}")
+            
+            if thumb_path and video_id:
+                try:
+                    youtube.thumbnails().set(
+                        videoId=video_id,
+                        media_body=MediaFileUpload(thumb_path, mimetype="image/jpeg")
+                    ).execute()
+                    print("Thumbnail uploaded")
+                except Exception as e:
+                    print(f"Thumbnail upload error: {e}")
+            
+            return video_id
+            
+        except ImportError:
+            print("google-api-python-client not installed, skipping YouTube upload")
+            return None
+        except Exception as e:
+            print(f"YouTube upload error: {e}")
+            return None
+    
+    def _build_description(self, script: VideoScript) -> str:
+        """Build YouTube description."""
+        lines = [
+            script.description,
+            "",
+            "Follow AjeebOology for daily mind-blowing facts!",
+            "",
+            "Hashtags:",
+            " ".join(script.hashtags),
+            "",
+            "Tags:",
+            ", ".join(script.tags)
+        ]
+        return "\n".join(lines)
+
+# =============================================================================
 # 9. MAIN PIPELINE
 # =============================================================================
 
@@ -1339,4 +1430,4 @@ class AjeebologyPipeline:
 if __name__ == "__main__":
     pipeline = AjeebologyPipeline()
     pipeline.run()
-          
+            
