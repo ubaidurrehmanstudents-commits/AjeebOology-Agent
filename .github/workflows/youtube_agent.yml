@@ -2,7 +2,6 @@ name: Ajeebology Shorts - Daily Automation
 
 on:
   schedule:
-    # Runs at 8:45 AM UTC (1:45 PM PKT) daily
     - cron: '45 8 * * *'
   workflow_dispatch:
     inputs:
@@ -11,22 +10,14 @@ on:
         required: false
         default: ''
 
-# Prevent multiple concurrent runs from eating up free tier minutes
-concurrency:
-  group: ajeebology-shorts-pipeline
-  cancel-in-progress: true
-
 env:
   PYTHONUNBUFFERED: "1"
   FORCE_COLOR: "1"
-  # Global directories to keep paths consistent
-  BASE_DIR: /tmp/ajeebology
-  FONTS_DIR: /tmp/ajeebology/fonts
 
 jobs:
   build-and-deliver:
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # Strict timeout to prevent runaway minute consumption
+    timeout-minutes: 45
     
     steps:
     - name: Checkout repository
@@ -39,17 +30,8 @@ jobs:
       with:
         python-version: '3.11'
     
-    - name: Cache Python dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-3.11-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-3.11-
-    
     - name: Install system dependencies
       run: |
-        echo "Installing system packages and FFmpeg..."
         sudo apt-get update -qq
         sudo apt-get install -y -qq \
           ffmpeg \
@@ -63,37 +45,20 @@ jobs:
           fonts-freefont-ttf \
           fonts-noto-core
         ffmpeg -version | head -1
-        echo "System dependencies installed."
-    
-    - name: Download Premium Fonts
-      run: |
-        mkdir -p ${{ env.FONTS_DIR }}
-        echo "Downloading Montserrat and Bebas Neue fonts..."
-        # Montserrat Bold
-        wget -q -O ${{ env.FONTS_DIR }}/Montserrat-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf"
-        # Bebas Neue
-        wget -q -O ${{ env.FONTS_DIR }}/BebasNeue-Regular.ttf "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf"
-        # Roboto (Fallback)
-        wget -q -O ${{ env.FONTS_DIR }}/Roboto-Bold.ttf "https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf"
-        echo "Fonts downloaded to ${{ env.FONTS_DIR }}"
-        ls -lh ${{ env.FONTS_DIR }}
     
     - name: Install Python dependencies
       run: |
-        echo "Installing Python packages..."
-        pip install --upgrade pip setuptools wheel
-        # Using faster-whisper instead of openai-whisper to save 10+ minutes of build time 
-        # and drastically reduce CPU inference time for word-level timestamps.
+        pip install --upgrade pip
         pip install \
           requests \
           Pillow \
           numpy \
           edge-tts \
-          faster-whisper \
-          imageio-ffmpeg
-        echo "Python dependencies installed."
+          openai-whisper
+        python -c "import PIL; print('Pillow:', PIL.__version__)"
+        python -c "import numpy; print('NumPy:', numpy.__version__)"
     
-    - name: Cache downloaded assets (B-roll, Audio)
+    - name: Cache downloaded assets
       uses: actions/cache@v4
       with:
         path: /tmp/ajeebology/assets
@@ -101,18 +66,10 @@ jobs:
         restore-keys: |
           ajeebology-assets-
     
-    - name: Check Runner Disk Space
-      run: |
-        echo "Disk space check before pipeline execution:"
-        df -h /tmp
-        df -h /
-    
     - name: Run Ajeebology Pipeline
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-        UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         GITHUB_RUN_ID: ${{ github.run_id }}
@@ -127,13 +84,9 @@ jobs:
         
         python youtube_agent.py
         
-        echo "Pipeline execution finished. Copying outputs..."
-        
         if [ -f /tmp/ajeebology/output/output_video.mp4 ]; then
           cp /tmp/ajeebology/output/output_video.mp4 output/
           echo "Video copied to output/"
-        else
-          echo "WARNING: output_video.mp4 not found!"
         fi
         
         if [ -f /tmp/ajeebology/output/thumbnail.jpg ]; then
@@ -157,11 +110,10 @@ jobs:
     - name: Cleanup temporary files
       if: always()
       run: |
-        echo "Cleaning up temporary files to save disk space..."
+        echo "Cleaning up temporary files..."
         rm -rf /tmp/ajeebology/frames
-        rm -rf /tmp/ajeebology/audio
         du -sh /tmp/ajeebology/ 2>/dev/null || true
-        df -h /tmp
+        df -h
     
     - name: Notify on failure
       if: failure()
@@ -169,7 +121,7 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        echo "Pipeline failed. Sending notification to Telegram..."
+        echo "Pipeline failed. Sending notification..."
         curl -s -X POST \
           "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
           -d "chat_id=${TELEGRAM_CHAT_ID}" \
