@@ -4,7 +4,7 @@ Ajeebology Shorts - Professional YouTube Shorts Automation Agent
 Fully automated pipeline: Research -> Script -> Voice -> Video -> Upload
 Language: Hinglish (Roman Hindi + English), Male voice
 Output: Vertical 1080x1920, ~55-65 seconds, 24 FPS
-Features: Karaoke ASS captions, Pexels video b-roll, audio ducking, YouTube upload
+Features: Karaoke ASS captions, Pexels video b-roll, audio ducking
 """
 
 import os
@@ -38,7 +38,6 @@ class Config:
     TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
     TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-    YOUTUBE_CLIENT_SECRETS = os.environ.get("YOUTUBE_CLIENT_SECRETS", "")
     PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
     UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
     GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "local")
@@ -238,8 +237,9 @@ Return ONLY valid JSON."""
             tags=data.get("tags", []),
             hashtags=data.get("hashtags", ["#Shorts", "#AjeebOology"]),
             segments=segments
-    )
-                            def _fallback_script(self, category: str) -> VideoScript:
+        )
+
+    def _fallback_script(self, category: str) -> VideoScript:
         texts = {
             "psychology": [
                 "Kya aap jante hain ki aapka brain 70 percent waqt auto-pilot par rehta hai?",
@@ -631,7 +631,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return f"{hours}:{minutes:02d}:{secs:05.2f}"
 
 # =============================================================================
-# 6. VIDEO RENDERING ENGINE
+# 6. VIDEO RENDERING ENGINE (Part 1)
 # =============================================================================
 
 class VideoEngine:
@@ -1059,6 +1059,7 @@ class VideoEngine:
             title = script.seo_title[:60]
             font = load_font(72)
             lines = self._wrap_text(title, font, 1100)
+            y font, 1100)
             y_pos = 200
             for line in lines[:2]:
                 bbox = font.getbbox(line)
@@ -1144,198 +1145,7 @@ class TelegramAgent:
 
 
 # =============================================================================
-# 8. YOUTUBE UPLOAD AGENT
-# =============================================================================
-
-class YouTubeAgent:
-    def __init__(self):
-        self.client_secrets = Config.YOUTUBE_CLIENT_SECRETS
-    
-    def upload_video(self, video_path: str, script: VideoScript,
-                     thumb_path: Optional[str] = None) -> Optional[str]:
-        """Upload video to YouTube via Data API v3."""
-        if not self.client_secrets:
-            print("YouTube client secrets not configured, skipping upload")
-            return None
-        
-        try:
-            from googleapiclient.discovery import build
-            from googleapiclient.http import MediaFileUpload
-            import pickle
-            
-            creds = None
-            token_path = str(Config.BASE_DIR / "youtube_token.pickle")
-            if os.path.exists(token_path):
-                with open(token_path, "rb") as token:
-                    creds = pickle.load(token)
-            
-            if not creds or not creds.valid:
-                print("YouTube credentials not available or expired.")
-                print("Please run OAuth flow locally and upload token.pickle to secrets.")
-                return None
-            
-            youtube = build("youtube", "v3", credentials=creds)
-            
-            body = {
-                "snippet": {
-                    "title": script.seo_title[:100],
-                    "description": self._build_description(script),
-                    "tags": script.tags[:15],
-                    "categoryId": "24",
-                    "defaultLanguage": "hi",
-                    "defaultAudioLanguage": "hi"
-                },
-                "status": {
-                    "privacyStatus": "private",
-                    "selfDeclaredMadeForKids": False
-                }
-            }
-            
-            media = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
-            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-            
-            print("Uploading to YouTube...")
-            response = None
-            while response is None:
-                status, response = request.next_chunk()
-                if status:
-                    print(f"Upload progress: {int(status.progress() * 100)}%")
-            
-            video_id = response.get("id")
-            print(f"YouTube upload complete: https://youtu.be/{video_id}")
-            
-            if thumb_path and video_id:
-                try:
-                    youtube.thumbnails().set(
-                        videoId=video_id,
-                        media_body=MediaFileUpload(thumb_path, mimetype="image/jpeg")
-                    ).execute()
-                    print("Thumbnail uploaded")
-                except Exception as e:
-                    print(f"Thumbnail upload error: {e}")
-            
-            return video_id
-            
-        except ImportError:
-            print("google-api-python-client not installed, skipping YouTube upload")
-            return None
-        except Exception as e:
-            print(f"YouTube upload error: {e}")
-            return None
-    
-    def _build_description(self, script: VideoScript) -> str:
-        """Build YouTube description."""
-        lines = [
-            script.description,
-            "",
-            "Follow AjeebOology for daily mind-blowing facts!",
-            "",
-            "Hashtags:",
-            " ".join(script.hashtags),
-            "",
-            "Tags:",
-            ", ".join(script.tags)
-        ]
-        return "\n".join(lines)
-
-# =============================================================================
-# =============================================================================
-# 8. YOUTUBE UPLOAD AGENT
-# =============================================================================
-
-class YouTubeAgent:
-    def __init__(self):
-        self.client_secrets = Config.YOUTUBE_CLIENT_SECRETS
-    
-    def upload_video(self, video_path: str, script: VideoScript,
-                     thumb_path: Optional[str] = None) -> Optional[str]:
-        """Upload video to YouTube via Data API v3."""
-        if not self.client_secrets:
-            print("YouTube client secrets not configured, skipping upload")
-            return None
-        
-        try:
-            from googleapiclient.discovery import build
-            from googleapiclient.http import MediaFileUpload
-            import pickle
-            
-            creds = None
-            token_path = str(Config.BASE_DIR / "youtube_token.pickle")
-            if os.path.exists(token_path):
-                with open(token_path, "rb") as token:
-                    creds = pickle.load(token)
-            
-            if not creds or not creds.valid:
-                print("YouTube credentials not available or expired.")
-                print("Please run OAuth flow locally and upload token.pickle to secrets.")
-                return None
-            
-            youtube = build("youtube", "v3", credentials=creds)
-            
-            body = {
-                "snippet": {
-                    "title": script.seo_title[:100],
-                    "description": self._build_description(script),
-                    "tags": script.tags[:15],
-                    "categoryId": "24",
-                    "defaultLanguage": "hi",
-                    "defaultAudioLanguage": "hi"
-                },
-                "status": {
-                    "privacyStatus": "private",
-                    "selfDeclaredMadeForKids": False
-                }
-            }
-            
-            media = MediaFileUpload(video_path, mimetype="video/mp4", resumable=True)
-            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-            
-            print("Uploading to YouTube...")
-            response = None
-            while response is None:
-                status, response = request.next_chunk()
-                if status:
-                    print(f"Upload progress: {int(status.progress() * 100)}%")
-            
-            video_id = response.get("id")
-            print(f"YouTube upload complete: https://youtu.be/{video_id}")
-            
-            if thumb_path and video_id:
-                try:
-                    youtube.thumbnails().set(
-                        videoId=video_id,
-                        media_body=MediaFileUpload(thumb_path, mimetype="image/jpeg")
-                    ).execute()
-                    print("Thumbnail uploaded")
-                except Exception as e:
-                    print(f"Thumbnail upload error: {e}")
-            
-            return video_id
-            
-        except ImportError:
-            print("google-api-python-client not installed, skipping YouTube upload")
-            return None
-        except Exception as e:
-            print(f"YouTube upload error: {e}")
-            return None
-    
-    def _build_description(self, script: VideoScript) -> str:
-        """Build YouTube description."""
-        lines = [
-            script.description,
-            "",
-            "Follow AjeebOology for daily mind-blowing facts!",
-            "",
-            "Hashtags:",
-            " ".join(script.hashtags),
-            "",
-            "Tags:",
-            ", ".join(script.tags)
-        ]
-        return "\n".join(lines)
-
-# =============================================================================
-# 9. MAIN PIPELINE
+# 8. MAIN PIPELINE
 # =============================================================================
 
 class AjeebologyPipeline:
@@ -1347,7 +1157,6 @@ class AjeebologyPipeline:
         self.asset_agent = AssetAgent()
         self.video_engine = VideoEngine()
         self.telegram_agent = TelegramAgent()
-        self.youtube_agent = YouTubeAgent()
     
     def run(self):
         """Execute full pipeline."""
@@ -1357,25 +1166,25 @@ class AjeebologyPipeline:
         
         try:
             # Step 1: Research
-            print("\n[1/7] Researching trending topics...")
+            print("\n[1/6] Researching trending topics...")
             category = Config.CATEGORY_OVERRIDE or random.choice(["psychology", "space", "weird_facts"])
             research = self.research_agent.research(category)
             print(f"Research topic: {research.get('topic', category)}")
             
             # Step 2: Generate Script
-            print("\n[2/7] Generating script...")
+            print("\n[2/6] Generating script...")
             script = self.script_agent.generate_script(research)
             print(f"Title: {script.seo_title}")
             print(f"Segments: {len(script.segments)}")
             
             # Step 3: Generate Voice
-            print("\n[3/7] Generating voice...")
+            print("\n[3/6] Generating voice...")
             audio_segments = self.voice_agent.generate_voice(script)
             total_voice = sum(s.duration for s in audio_segments)
             print(f"Total voice duration: {total_voice:.2f}s")
             
             # Step 4: Fetch Assets
-            print("\n[4/7] Fetching b-roll assets...")
+            print("\n[4/6] Fetching b-roll assets...")
             broll_paths = []
             for i, seg in enumerate(script.segments):
                 if seg.broll_prompt and Config.BROLL_ENABLED:
@@ -1389,13 +1198,13 @@ class AjeebologyPipeline:
             bg_music = self.asset_agent.fetch_background_music()
             
             # Step 5: Mix Audio
-            print("\n[5/7] Mixing audio with ducking...")
+            print("\n[5/6] Mixing audio with ducking...")
             final_audio = self.voice_agent.mix_audio(audio_segments, bg_music)
             final_duration = get_audio_duration(final_audio)
             print(f"Final audio duration: {final_duration:.2f}s")
             
             # Step 6: Render Video
-            print("\n[6/7] Rendering video with karaoke captions...")
+            print("\n[6/6] Rendering video with karaoke captions...")
             video_path = self.video_engine.render_video(
                 script, audio_segments, broll_paths, final_audio
             )
@@ -1407,14 +1216,10 @@ class AjeebologyPipeline:
             print("\n[7/7] Delivering...")
             self.telegram_agent.send_video(video_path, script, thumb_path)
             
-            # YouTube upload (optional)
-            youtube_id = self.youtube_agent.upload_video(video_path, script, thumb_path)
-            
             print("\n" + "=" * 60)
             print("PIPELINE COMPLETE")
             print(f"Video: {video_path}")
-            if youtube_id:
-                print(f"YouTube: https://youtu.be/{youtube_id}")
+            print(f"Thumbnail: {thumb_path}")
             print("=" * 60)
             
         except Exception as e:
