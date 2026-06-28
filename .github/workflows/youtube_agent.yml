@@ -43,8 +43,7 @@ jobs:
             fonts-dejavu-core \
             fonts-liberation \
             fonts-freefont-ttf \
-            fonts-noto-core \
-            fonts-noto-devanagari \
+            fonts-noto \
             fonts-noto-color-emoji
           ffmpeg -version | head -1
           fc-list | grep -i noto | head -5 || echo "Noto fonts check complete"
