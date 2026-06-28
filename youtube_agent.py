@@ -859,10 +859,8 @@ class AnimationEngine:
                 alpha = alpha.point(lambda p: int(p * transform["opacity"] / 255))
                 word_img.putalpha(alpha)
 
-            # Ensure word_img fits within base dimensions
-            if word_img.width > base.width or word_img.height > base.height:
-                word_img = word_img.crop((0, 0, min(word_img.width, base.width), min(word_img.height, base.height)))
-            base = Image.alpha_composite(base, word_img)
+            # Paste with alpha mask (handles off-screen automatically)
+            base.paste(word_img, (paste_x, paste_y), word_img)
 
             if transform["emoji"]:
                 eimg = self.text_r.render_emoji(transform["emoji"])
@@ -870,9 +868,7 @@ class AnimationEngine:
                 ex = wx + ww // 2 + 10
                 ey = wy - eh // 2
                 bounce = int(abs(math.sin(frame_idx * 0.2)) * 10)
-                if eimg.width > base.width or eimg.height > base.height:
-                    eimg = eimg.crop((0, 0, min(eimg.width, base.width), min(eimg.height, base.height)))
-                base = Image.alpha_composite(base, eimg.convert("RGBA"))
+                base.paste(eimg.convert("RGBA"), (ex, ey + bounce), eimg.convert("RGBA"))
 
             if tok.emphasis and transform["scale"] > 1.2:
                 visual_energy += transform["scale"]
