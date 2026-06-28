@@ -127,9 +127,22 @@ def run_cmd(cmd: List[str], to: int = 300, binary: bool = False) -> Tuple[int, A
         return -1, b"" if binary else "", "timeout"
 
 def audio_dur(p: str) -> float:
-    rc, out, _ = run_cmd(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+    if not os.path.exists(p) or os.path.getsize(p) < 1024:
+        return 0.0
+    rc, out, err = run_cmd(["ffprobe", "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", p], 30)
-    return float(out.strip()) if rc == 0 and out.strip() else 0.0
+    if rc == 0 and out and out.strip():
+        try:
+            return float(out.strip())
+        except:
+            pass
+    rc, out, err = run_cmd(["ffmpeg", "-i", p, "-f", "null", "-"], 30)
+    if err:
+        m = re.search(r'Duration:\s+(\d+):(\d+):(\d+\.?\d*)', err)
+        if m:
+            h, mi, s = m.groups()
+            return int(h) * 3600 + int(mi) * 60 + float(s)
+    return 0.0
 
 def ensure_dirs():
     for d in [Config.FRAMES, Config.AUDIO, Config.ASSETS, Config.OUTPUT]:
@@ -1151,7 +1164,8 @@ class VoiceAgent:
             run_cmd(["ffmpeg", "-y", "-i", vsfx, "-i", bg, "-filter_complex", fc, "-map", "[out]", "-c:a", "libmp3lame", "-q:a", 2, "-ar", str(Config.AUDIO_SR), final], 120)
         else:
             run_cmd(["ffmpeg", "-y", "-i", vsfx, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "libmp3lame", "-q:a", 2, "-ar", str(Config.AUDIO_SR), final], 120)
-        if not os.path.exists(final):
+        if not os.path.exists(final) or os.path.getsize(final) < 1024:
+            print(f"Warning: final audio mix failed or too small, copying vsfx")
             shutil.copy(vsfx, final)
         return final
 
@@ -1264,7 +1278,16 @@ class VideoRenderer:
     def render(self, script: VideoScript, audio_segs: List[AudioSeg],
                 broll_paths: List[Optional[str]], audio_path: str) -> Tuple[str, int]:
         total_dur = audio_dur(audio_path)
-        total_frames = int(total_dur * Config.FPS)
+        if total_dur <= 0:
+            total_dur = script.total_dur
+            print(f"Warning: audio_dur failed, using script.total_dur: {total_dur:.2f}s")
+        if total_dur <= 0:
+            total_dur = sum(s.dur for s in audio_segs)
+            print(f"Warning: using sum of audio_segs: {total_dur:.2f}s")
+        if total_dur <= 0:
+            total_dur = 60.0
+            print(f"Warning: using default duration: {total_dur:.2f}s")
+        total_frames = max(1, int(total_dur * Config.FPS))
         print(f"Rendering {total_frames} frames @ {Config.FPS}fps, {total_dur:.2f}s")
 
         tokens = WordTimeline.build(audio_segs)
