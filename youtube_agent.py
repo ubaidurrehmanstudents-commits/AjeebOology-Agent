@@ -620,7 +620,7 @@ class AnimationEngine:
         breathe = int(math.sin(frame_idx * 0.03) * 3)
         return cx, base_y + breathe
 
-    def _calc_word_transform(self, token: WordToken, frame_idx: int, fps: int) -> Dict:
+    def _calc_word_transform(self, token: WordToken, frame_idx: int, fps: int, total_frames: int) -> Dict:
         t_frame = frame_idx / fps
         dur = token.t1 - token.t0
         if dur <= 0:
@@ -834,7 +834,7 @@ class AnimationEngine:
             if not (tok.t0 - 0.15 <= t < tok.t1 + 0.15):
                 continue
             words_on_screen += 1
-            transform = self._calc_word_transform(tok, frame_idx, total_frames)
+            transform = self._calc_word_transform(tok, frame_idx, Config.FPS, total_frames)
 
             size = int(Config.SZ_WORD * transform["scale"])
             if tok.emphasis:
