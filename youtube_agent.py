@@ -124,11 +124,6 @@ def load_font(size: int, emoji: bool = False) -> ImageFont.FreeTypeFont:
             except: continue
     return ImageFont.load_default()
 
-def hex_to_rgb(h: str) -> Tuple[int,int,int]:
-    h = h.lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-
 # =============================================================================
 # EASING FUNCTIONS (After Effects curves)
 # =============================================================================
@@ -147,14 +142,20 @@ def ease_out_expo(t: float) -> float:
 
 def ease_out_bounce(t: float) -> float:
     n1, d1 = 7.5625, 2.75
-    if t < 1/d1: return n1*t*t
-    elif t < 2/d1: return n1*(t-=1.5/d1)*t + 0.75
-    elif t < 2.5/d1: return n1*(t-=2.25/d1)*t + 0.9375
-    return n1*(t-=2.625/d1)*t + 0.984375
+    if t < 1/d1: 
+        return n1*t*t
+    elif t < 2/d1: 
+        t2 = t - 1.5/d1
+        return n1*t2*t2 + 0.75
+    elif t < 2.5/d1: 
+        t2 = t - 2.25/d1
+        return n1*t2*t2 + 0.9375
+    else:
+        t2 = t - 2.625/d1
+        return n1*t2*t2 + 0.984375
 
 def ease_in_expo(t: float) -> float:
     return 0.0 if t <= 0 else pow(2, 10*(t-1))
-
 
 # =============================================================================
 # WORD TIMELINE PARSER (replaces ASS — Option B)
@@ -165,7 +166,7 @@ class WordTimeline:
 
     @staticmethod
     def count_syl(word: str) -> int:
-        word = word.lower().strip(".,!?;:\"'")
+        word = word.lower().strip('.,!?;:"\'')
         if not word: return 1
         v = "aeiou"; c = 0; pv = False
         for ch in word:
@@ -197,8 +198,7 @@ class WordTimeline:
                 t_cursor += wdur
         return tokens
 
-
-# =============================================================================
+  # =============================================================================
 # TEXT RENDERER (glow, shadow, chromatic aberration, 3D extrusion)
 # =============================================================================
 
@@ -271,8 +271,7 @@ class TextRenderer:
         ImageDraw.Draw(img).text((10,10), emoji, font=font, embedded_color=True)
         return img
 
-
-# =============================================================================
+  # =============================================================================
 # MOTION GRAPHICS ENGINE (Fractal noise, particles, bokeh, audio bars)
 # =============================================================================
 
@@ -334,7 +333,7 @@ class MotionGraphics:
                 r,g,b = max(0,min(255,r)), max(0,min(255,g)), max(0,min(255,b))
                 draw.rectangle([x, y, x+6, y+6], fill=(r,g,b))
 
-    def draw_particles(self, draw: ImageDraw, frame_idx: int):
+              def draw_particles(self, draw: ImageDraw, frame_idx: int):
         for p in self.particles:
             px = (p["x"] + p["sx"]*frame_idx) % self.w
             py = (p["y"] + p["sy"]*frame_idx) % self.h
@@ -413,8 +412,7 @@ class MotionGraphics:
         font = load_font(26)
         draw.text((cx-50, cy+40), "AjeebOology", font=font, fill=Config.TEXT)
 
-
-# =============================================================================
+      # =============================================================================
 # DEPTH ENGINE (MiDaS parallax — lightweight CPU)
 # =============================================================================
 
@@ -474,7 +472,6 @@ class DepthEngine:
                 ny = max(0, min(h-1, y + shift_y))
                 result[y, x] = img_arr[ny, nx]
         return Image.fromarray(result)
-
 
 # =============================================================================
 # SFX ENGINE (Procedural sound design)
@@ -546,7 +543,6 @@ class SFXEngine:
         flat_inputs = [item for sub in inputs for item in sub]
         cmd = ["ffmpeg","-y"] + flat_inputs + ["-filter_complex",fc,"-map","[out]","-c:a","libmp3lame","-q:a","2",out_path]
         run_cmd(cmd, 120)
-
 
 # =============================================================================
 # ANIMATION ENGINE (Kinetic Typography — Option B Core)
@@ -654,7 +650,6 @@ class AnimationEngine:
     def _pick_emoji(self, seg_type: str) -> str:
         emojis = {"hook": "😱", "fact1": "🔥", "fact2": "💡", "fact3": "🧠", "conclusion": "✅"}
         return emojis.get(seg_type, "✨")
-
     def _apply_velocity_blur(self, img: Image.Image, velocity: Tuple[float,float]) -> Image.Image:
         vx, vy = velocity
         speed = math.hypot(vx, vy)
@@ -718,7 +713,7 @@ class AnimationEngine:
         arr = np.where(arr < 30, arr * 0.85, arr)
         arr = np.clip((arr - 128) * 1.08 + 128, 0, 255)
         return Image.fromarray(arr.astype(np.uint8))
-
+      
 
     def render_frame(self, frame_idx: int, total_frames: int, tokens: List[WordToken],
                      broll_paths: List[Optional[str]], audio_rms: float,
@@ -860,8 +855,6 @@ class AnimationEngine:
         draw_final.rectangle([0, self.h-12, self.w, self.h], fill=(0,0,0))
 
         return final, visual_energy
-
-
     def _resize_cover(self, img: Image.Image, tw: int, th: int) -> Image.Image:
         ir = img.width / img.height
         tr = tw / th
@@ -904,8 +897,7 @@ class AnimationEngine:
                                radius=25, fill=Config.ACCENT2+(200,), outline=Config.TEXT+(255,), width=2)
         draw.text((x, y), txt, font=font, fill=Config.TEXT)
 
-
-# =============================================================================
+  # =============================================================================
 # AUDIO ANALYSIS (RMS per frame for reactive elements)
 # =============================================================================
 
@@ -944,7 +936,7 @@ class AudioAnalyzer:
 # =============================================================================
 
 class ScriptAgent:
-    SYS = """You are a professional YouTube Shorts scriptwriter for 'AjeebOology'.
+    SYS = '''You are a professional YouTube Shorts scriptwriter for 'AjeebOology'.
 Create engaging scripts in Hinglish (Roman Hindi + English).
 Target: Indian youth 18-34. Tone: curious, energetic, slightly dramatic.
 
@@ -956,7 +948,7 @@ Rules:
 - B-roll prompts: vivid image search terms
 - Output valid JSON only
 
-JSON: {"title":"","category":"","seo_title":"","description":"","tags":[],"hashtags":[],"segments":[{"text":"","segment_type":"","emphasis_words":[],"broll_prompt":""}]}"""
+JSON: {"title":"","category":"","seo_title":"","description":"","tags":[],"hashtags":[],"segments":[{"text":"","segment_type":"","emphasis_words":[],"broll_prompt":""}]}'''
 
     def __init__(self):
         self.key = Config.GROQ_API_KEY
@@ -1013,8 +1005,7 @@ JSON: {"title":"","category":"","seo_title":"","description":"","tags":[],"hasht
                            tags=[cat,"facts","shorts"], hashtags=["#Shorts","#AjeebOology","#Facts"],
                            segments=segs)
 
-
-# =============================================================================
+  # =============================================================================
 # RESEARCH AGENT (Tavily)
 # =============================================================================
 
@@ -1063,9 +1054,9 @@ class VoiceAgent:
         return segs
 
     def _clean(self, txt: str) -> str:
-        txt = re.sub(r"[#@]\w+", "", txt)
-        txt = re.sub(r"https?://\S+", "", txt)
-        txt = re.sub(r"[\*_\~`']", "", txt)
+        txt = re.sub(r'[#@]\w+', '', txt)
+        txt = re.sub(r'https?://\S+', '', txt)
+        txt = re.sub(r'[*_~`]', '', txt)
         return txt.strip()
 
     def _edge(self, txt: str, out: str) -> bool:
@@ -1104,8 +1095,7 @@ class VoiceAgent:
             shutil.copy(vsfx, final)
         return final
 
-
-# =============================================================================
+      # =============================================================================
 # ASSET AGENT (B-Roll + BG Music)
 # =============================================================================
 
@@ -1157,7 +1147,7 @@ class AssetAgent:
         try:
             r = requests.get(f"https://image.pollinations.ai/prompt/{quote_plus(p)}?width=1080&height=1920&nologo=true&seed={random.randint(1,9999)}", timeout=60)
             if r.status_code == 200:
-                with open(dest,"wb") as f: f.write(r.content)
+                with open(dest,"wb") as f: f.write(rr.content)
                 return os.path.exists(dest) and os.path.getsize(dest) > 10240
             return False
         except Exception as e:
@@ -1299,8 +1289,7 @@ class VideoRenderer:
         except Exception as e:
             print(f"Thumb error: {e}"); return None
 
-
-# =============================================================================
+  # =============================================================================
 # TELEGRAM DELIVERY
 # =============================================================================
 
@@ -1310,101 +1299,5 @@ class TelegramAgent:
         self.cid = Config.TELEGRAM_CHAT_ID
         self.url = f"https://api.telegram.org/bot{self.tok}"
 
-    def send(self, video: str, script: VideoScript, thumb: Optional[str]):
-        if not self.tok or not self.cid:
-            print("Telegram not configured"); return
-        cap = f"<b>{script.seo_title}</b>\n\nCategory: {script.category}\nTags: {', '.join(script.tags[:5])}\n\nHashtags:\n{' '.join(script.hashtags[:8])}"
-        try:
-            with open(video,"rb") as vf:
-                files = {"video": vf}
-                data = {"chat_id": self.cid, "caption": cap[:1024], "parse_mode": "HTML"}
-                if thumb and os.path.exists(thumb):
-                    with open(thumb,"rb") as tf:
-                        files["thumbnail"] = tf
-                r = requests.post(f"{self.url}/sendVideo", data=data, files=files, timeout=120)
-                print("Telegram OK" if r.status_code == 200 else f"Telegram err: {r.text}")
-        except Exception as e:
-            print(f"Telegram err: {e}")
-
-# =============================================================================
-# MAIN PIPELINE
-# =============================================================================
-
-class Pipeline:
-    def __init__(self):
-        ensure_dirs()
-        self.script_a = ScriptAgent()
-        self.research_a = ResearchAgent()
-        self.voice_a = VoiceAgent()
-        self.asset_a = AssetAgent()
-        self.video_r = VideoRenderer()
-        self.tg = TelegramAgent()
-
-    def run(self):
-        print("="*60)
-        print("AJEEBOLOGY SHORTS — CINEMATIC PIPELINE")
-        print("="*60)
-        try:
-            # 1. Research
-            print("\n[1/7] Researching...")
-            cat = Config.CATEGORY_OVERRIDE or random.choice(["psychology","space","weird_facts"])
-            research = self.research_a.research(cat)
-            print(f"  Topic: {research.get('topic', cat)}")
-
-            # 2. Script
- or random.choice(["psychology","space","weird_facts"])
-            research = self.research_a.research(cat)
-            print(f"  Topic: {research.get('topic', cat)}")
-
-            # 2. Script
-            print("\n[2/7] Generating script...")
-            script = self.script_a.generate(research)
-            print(f"  Title: {script.seo_title}")
-            print(f"  Segments: {len(script.segments)}")
-
-            # 3. Voice
-            print("\n[3/7] Generating voice...")
-            audio_segs = self.voice_a.generate(script)
-            print(f"  Voice: {sum(s.dur for s in audio_segs):.2f}s")
-
-            # 4. Assets
-            print("\n[4/7] Fetching assets...")
-            brolls = []
-            for i, seg in enumerate(script.segments):
-                p = self.asset_a.fetch_broll(seg.broll_prompt, i) if seg.broll_prompt and Config.BROLL_ON else None
-                brolls.append(p)
-                print(f"  Seg {i} ({seg.seg_type}): {'OK' if p else 'FAIL'}")
-            bg = self.asset_a.fetch_bg()
-
-            # 5. SFX + Mix
-            print("\n[5/7] Planning SFX & mixing audio...")
-            audio_path = self.voice_a.mix(audio_segs, bg, [])
-            final_dur = audio_dur(audio_path)
-            print(f"  Audio: {final_dur:.2f}s")
-
-            # 6. Render Video
-            print("\n[6/7] Rendering cinematic video...")
-            video_path, peak_frame = self.video_r.render(script, audio_segs, brolls, audio_path)
-
-            # 7. Thumbnail
-            print("\n[7/7] Generating peak-energy thumbnail...")
-            thumb_path = self.video_r.generate_thumbnail(script, peak_frame)
-
-            # 8. Deliver
-            print("\nDelivering...")
-            self.tg.send(video_path, script, thumb_path)
-
-            print("\n" + "="*60)
-            print("PIPELINE COMPLETE")
-            print(f"Video: {video_path}")
-            print(f"Thumb: {thumb_path}")
-            print("="*60)
-
-        except Exception as e:
-            print(f"\nFAILED: {e}")
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
-
-if __name__ == "__main__":
-    Pipeline().run()
+    def send(self, video: str, script:
+             
