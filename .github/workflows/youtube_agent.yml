@@ -18,75 +18,88 @@ jobs:
   build-and-deliver:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
-    
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq \
-          ffmpeg \
-          libsm6 \
-          libxext6 \
-          libgl1 \
-          libfontconfig1 \
-          libxrender1 \
-          fonts-dejavu-core \
-          fonts-liberation \
-          fonts-freefont-ttf \
-          fonts-noto-core \
-          fonts-noto-devanagari
-        ffmpeg -version | head -1
-        fc-list | grep -i noto | head -5 || echo "Noto fonts check complete"
-    
-    - name: Install Python dependencies
-      run: |
-        pip install --upgrade pip
-        pip install \
-          requests \
-          Pillow \
-          numpy \
-          edge-tts \
-          tenacity
-        python -c "import PIL; print('Pillow:', PIL.__version__)"
-        python -c "import numpy; print('NumPy:', numpy.__version__)"
-    
-    - name: Cache downloaded assets
-      uses: actions/cache@v4
-      with:
-        path: /tmp/ajeebology/assets
-        key: ajeebology-assets-${{ github.run_id }}
-        restore-keys: |
-          ajeebology-assets-
-    
-    - name: Run Ajeebology Pipeline
-      env:
-        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-        UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-        GITHUB_RUN_ID: ${{ github.run_id }}
-        GITHUB_REPOSITORY: ${{ github.repository }}
-        CATEGORY_OVERRIDE: ${{ github.event.inputs.category }}
-      run: |
-        python youtube_agent.py
-    
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: ajeebology-output-${{ github.run_id }}
-        path: /tmp/ajeebology/output/
-        retention-days: 7
-        
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            ffmpeg \
+            libsm6 \
+            libxext6 \
+            libgl1 \
+            libfontconfig1 \
+            libxrender1 \
+            fonts-dejavu-core \
+            fonts-liberation \
+            fonts-freefont-ttf \
+            fonts-noto-core \
+            fonts-noto-devanagari \
+            fonts-noto-color-emoji
+          ffmpeg -version | head -1
+          fc-list | grep -i noto | head -5 || echo "Noto fonts check complete"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            requests \
+            Pillow \
+            numpy \
+            edge-tts \
+            tenacity \
+            transformers \
+            torch
+          python -c "import PIL; print('Pillow:', PIL.__version__)"
+          python -c "import numpy; print('NumPy:', numpy.__version__)"
+          python -c "import torch; print('PyTorch:', torch.__version__)"
+          python -c "import transformers; print('Transformers:', transformers.__version__)"
+
+      - name: Cache downloaded assets
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ajeebology/assets
+          key: ajeebology-assets-${{ github.run_id }}
+          restore-keys: |
+            ajeebology-assets-
+
+      - name: Cache MiDaS depth model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: midas-model-${{ hashFiles('**/*.py') }}
+          restore-keys: |
+            midas-model-
+
+      - name: Run Ajeebology Pipeline
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          CATEGORY_OVERRIDE: ${{ github.event.inputs.category }}
+        run: |
+          python youtube_agent.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ajeebology-output-${{ github.run_id }}
+          path: /tmp/ajeebology/output/
+          retention-days: 7
+          
