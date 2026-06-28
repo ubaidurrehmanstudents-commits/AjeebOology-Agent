@@ -120,6 +120,7 @@ class FrameEnergy:
 
 def run_cmd(cmd: List[str], to: int = 300, binary: bool = False) -> Tuple[int, Any, Any]:
     try:
+        cmd = [str(c) for c in cmd]  # FIX: auto-convert ints/floats to strings
         r = subprocess.run(cmd, capture_output=True, text=not binary, timeout=to, check=False)
         return r.returncode, r.stdout if not binary else r.stdout, r.stderr if not binary else r.stderr
     except subprocess.TimeoutExpired:
