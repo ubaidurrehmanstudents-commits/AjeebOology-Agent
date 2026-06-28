@@ -3,7 +3,7 @@
 Ajeebology Shorts - Cinematic YouTube Shorts Automation Agent
 After Effects-level motion graphics | 100% Python + FFmpeg | GitHub Actions
 22 Features: Kinetic typography, 3D parallax, fractal noise, bokeh, chromatic aberration,
-             velocity blur, audio-reactive bars, procedural SFX, peak-energy thumbnail, etc.
+ velocity blur, audio-reactive bars, procedural SFX, peak-energy thumbnail, etc.
 Language: Hinglish | Output: 1080x1920 24fps | Option B: Full PIL word rendering (no ASS)
 """
 
@@ -25,13 +25,13 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # =============================================================================
 
 class Config:
-    GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
-    TAVILY_API_KEY   = os.environ.get("TAVILY_API_KEY", "")
-    TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+    TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-    PEXELS_API_KEY   = os.environ.get("PEXELS_API_KEY", "")
-    UNSPLASH_KEY     = os.environ.get("UNSPLASH_ACCESS_KEY", "")
-    GITHUB_RUN_ID    = os.environ.get("GITHUB_RUN_ID", "local")
+    PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
+    UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
+    GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "local")
     CATEGORY_OVERRIDE= os.environ.get("CATEGORY_OVERRIDE", "")
 
     W, H, FPS = 1080, 1920, 24
@@ -45,24 +45,24 @@ class Config:
     SZ_TITLE, SZ_BODY, SZ_WORD = 72, 56, 68
 
     # Cinematic palette
-    BG_DARK  = (8, 4, 20)
-    BG_MID   = (25, 12, 50)
-    ACCENT   = (0, 255, 255)
-    ACCENT2  = (255, 0, 128)
-    TEXT     = (255, 255, 255)
+    BG_DARK = (8, 4, 20)
+    BG_MID = (25, 12, 50)
+    ACCENT = (0, 255, 255)
+    ACCENT2 = (255, 0, 128)
+    TEXT = (255, 255, 255)
     TEXT_DIM = (180, 180, 200)
     HIGHLIGHT= (255, 255, 0)
     GLASS_BG = (20, 10, 40, 180)
 
     BASE = Path("/tmp/ajeebology")
     FRAMES = BASE / "frames"
-    AUDIO  = BASE / "audio"
+    AUDIO = BASE / "audio"
     ASSETS = BASE / "assets"
     OUTPUT = BASE / "output"
 
     BROLL_ON = True
     POLLINATIONS_ON = True
-    MIDAS_ON = True  # depth parallax
+    MIDAS_ON = True # depth parallax
 
 random.seed(Config.GITHUB_RUN_ID)
 
@@ -142,12 +142,12 @@ def ease_out_expo(t: float) -> float:
 
 def ease_out_bounce(t: float) -> float:
     n1, d1 = 7.5625, 2.75
-    if t < 1/d1: 
+    if t < 1/d1:
         return n1*t*t
-    elif t < 2/d1: 
+    elif t < 2/d1:
         t2 = t - 1.5/d1
         return n1*t2*t2 + 0.75
-    elif t < 2.5/d1: 
+    elif t < 2.5/d1:
         t2 = t - 2.25/d1
         return n1*t2*t2 + 0.9375
     else:
@@ -198,7 +198,7 @@ class WordTimeline:
                 t_cursor += wdur
         return tokens
 
-  # =============================================================================
+# =============================================================================
 # TEXT RENDERER (glow, shadow, chromatic aberration, 3D extrusion)
 # =============================================================================
 
@@ -207,7 +207,7 @@ class TextRenderer:
 
     def __init__(self):
         self.font_word = load_font(Config.SZ_WORD)
-        self.font_emp  = load_font(int(Config.SZ_WORD * 1.35))
+        self.font_emp = load_font(int(Config.SZ_WORD * 1.35))
         self.font_emoji= load_font(48, emoji=True)
 
     def render_word(self, text: str, size: int, emphasis: bool = False,
@@ -271,7 +271,7 @@ class TextRenderer:
         ImageDraw.Draw(img).text((10,10), emoji, font=font, embedded_color=True)
         return img
 
-  # =============================================================================
+# =============================================================================
 # MOTION GRAPHICS ENGINE (Fractal noise, particles, bokeh, audio bars)
 # =============================================================================
 
@@ -333,7 +333,7 @@ class MotionGraphics:
                 r,g,b = max(0,min(255,r)), max(0,min(255,g)), max(0,min(255,b))
                 draw.rectangle([x, y, x+6, y+6], fill=(r,g,b))
 
-              def draw_particles(self, draw: ImageDraw, frame_idx: int):
+    def draw_particles(self, draw: ImageDraw, frame_idx: int):
         for p in self.particles:
             px = (p["x"] + p["sx"]*frame_idx) % self.w
             py = (p["y"] + p["sy"]*frame_idx) % self.h
@@ -412,7 +412,8 @@ class MotionGraphics:
         font = load_font(26)
         draw.text((cx-50, cy+40), "AjeebOology", font=font, fill=Config.TEXT)
 
-      # =============================================================================
+
+# =============================================================================
 # DEPTH ENGINE (MiDaS parallax — lightweight CPU)
 # =============================================================================
 
@@ -650,6 +651,7 @@ class AnimationEngine:
     def _pick_emoji(self, seg_type: str) -> str:
         emojis = {"hook": "😱", "fact1": "🔥", "fact2": "💡", "fact3": "🧠", "conclusion": "✅"}
         return emojis.get(seg_type, "✨")
+
     def _apply_velocity_blur(self, img: Image.Image, velocity: Tuple[float,float]) -> Image.Image:
         vx, vy = velocity
         speed = math.hypot(vx, vy)
@@ -661,7 +663,7 @@ class AnimationEngine:
         return Image.blend(img, blurred, alpha)
 
     def _draw_glitch_transition(self, base: Image.Image, frame_idx: int, seg_idx: int,
-                               prev_seg: int, tokens: List[WordToken]) -> Image.Image:
+                                prev_seg: int, tokens: List[WordToken]) -> Image.Image:
         if seg_idx == prev_seg or prev_seg < 0:
             return base
         glitch_progress = (frame_idx % self.GLITCH_FRAMES) / self.GLITCH_FRAMES
@@ -713,7 +715,7 @@ class AnimationEngine:
         arr = np.where(arr < 30, arr * 0.85, arr)
         arr = np.clip((arr - 128) * 1.08 + 128, 0, 255)
         return Image.fromarray(arr.astype(np.uint8))
-      
+
 
     def render_frame(self, frame_idx: int, total_frames: int, tokens: List[WordToken],
                      broll_paths: List[Optional[str]], audio_rms: float,
@@ -855,6 +857,7 @@ class AnimationEngine:
         draw_final.rectangle([0, self.h-12, self.w, self.h], fill=(0,0,0))
 
         return final, visual_energy
+
     def _resize_cover(self, img: Image.Image, tw: int, th: int) -> Image.Image:
         ir = img.width / img.height
         tr = tw / th
@@ -897,7 +900,7 @@ class AnimationEngine:
                                radius=25, fill=Config.ACCENT2+(200,), outline=Config.TEXT+(255,), width=2)
         draw.text((x, y), txt, font=font, fill=Config.TEXT)
 
-  # =============================================================================
+# =============================================================================
 # AUDIO ANALYSIS (RMS per frame for reactive elements)
 # =============================================================================
 
@@ -914,7 +917,7 @@ class AudioAnalyzer:
         ]
         rc, out, err = run_cmd(cmd, 120)
         rms_vals = []
-        for line in (out + err).split("\n"):
+        for line in (out + err).split("\\n"):
             if "RMS level dB" in line:
                 try:
                     db = float(line.split(":")[-1].strip())
@@ -981,20 +984,20 @@ JSON: {"title":"","category":"","seo_title":"","description":"","tags":[],"hasht
     def _fallback(self, cat: str) -> VideoScript:
         txts = {
             "psychology": ["Kya aap jante hain ki aapka brain 70 percent waqt auto-pilot par rehta hai?",
-                "Jab aap drive kar rahe hote hain, tab aapka subconscious mind control mein hota hai.",
-                "Aur jab aap sochte hain ki aap conscious hain, woh bhi ek illusion hai!",
-                "Scientists ne prove kiya hai ki decisions 7 seconds pehle brain mein ban chuke hote hain.",
-                "Toh agli baar jab koi decision lo, yaad rakhna - aapka brain pehle se hi decide kar chuka tha!"],
+                           "Jab aap drive kar rahe hote hain, tab aapka subconscious mind control mein hota hai.",
+                           "Aur jab aap sochte hain ki aap conscious hain, woh bhi ek illusion hai!",
+                           "Scientists ne prove kiya hai ki decisions 7 seconds pehle brain mein ban chuke hote hain.",
+                           "Toh agli baar jab koi decision lo, yaad rakhna - aapka brain pehle se hi decide kar chuka tha!"],
             "space": ["Space mein aawaz kyun nahi jaati? Reason sunke shock ho jaaoge!",
-                "Aawaz travel karne ke liye medium chahiye, aur space mein vacuum hai.",
-                "Lekin suno, agar aap Mars pe khade hokar chillao, toh wahan ke atmosphere mein aawaz jayegi!",
-                "Aur NASA ke microphones ne actually Mars ki aawazein record ki hain!",
-                "Toh space silent nahi hai, bas uska silence alag tarah ka hai!"],
+                      "Aawaz travel karne ke liye medium chahiye, aur space mein vacuum hai.",
+                      "Lekin suno, agar aap Mars pe khade hokar chillao, toh wahan ke atmosphere mein aawaz jayegi!",
+                      "Aur NASA ke microphones ne actually Mars ki aawazein record ki hain!",
+                      "Toh space silent nahi hai, bas uska silence alag tarah ka hai!"],
             "weird_facts": ["Yeh fact sunke aapka dimaag ghoom jayega!",
-                "Honey kabhi spoil nahi hota. Archaeologists ne 3000 saal purana honey khaya aur woh theek tha!",
-                "Aur octopus ke paas 3 dil hote hain, aur woh blue blood rakhte hain!",
-                "Banana technically ek berry hai, aur strawberry technically berry nahi hai!",
-                "Duniya itni ajeeb hai ki facts bhi confuse ho jate hain!"]
+                            "Honey kabhi spoil nahi hota. Archaeologists ne 3000 saal purana honey khaya aur woh theek tha!",
+                            "Aur octopus ke paas 3 dil hote hain, aur woh blue blood rakhte hain!",
+                            "Banana technically ek berry hai, aur strawberry technically berry nahi hai!",
+                            "Duniya itni ajeeb hai ki facts bhi confuse ho jate hain!"]
         }
         types = ["hook","fact1","fact2","fact3","conclusion"]
         segs = [ScriptSegment(text=t, seg_type=types[i],
@@ -1005,7 +1008,8 @@ JSON: {"title":"","category":"","seo_title":"","description":"","tags":[],"hasht
                            tags=[cat,"facts","shorts"], hashtags=["#Shorts","#AjeebOology","#Facts"],
                            segments=segs)
 
-  # =============================================================================
+
+# =============================================================================
 # RESEARCH AGENT (Tavily)
 # =============================================================================
 
@@ -1020,7 +1024,7 @@ class ResearchAgent:
                    "weird_facts":"incredible weird facts 2026 viral"}
         try:
             r = requests.post(self.url, json={"api_key":self.key,"query":queries.get(cat,queries["weird_facts"]),
-                                              "search_depth":"basic","max_results":5}, timeout=30)
+                                                "search_depth":"basic","max_results":5}, timeout=30)
             r.raise_for_status()
             res = r.json().get("results",[])
             if res: return {"topic":res[0].get("title",cat),"results":res}
@@ -1090,12 +1094,12 @@ class VoiceAgent:
                   "[0:a][bg]amix=inputs=2:duration=first:weights=1 0.25[Mixed];[Mixed]loudnorm=I=-14:TP=-1.5:LRA=11[out]")
             run_cmd(["ffmpeg","-y","-i",vsfx,"-i",bg,"-filter_complex",fc,"-map","[out]","-c:a","libmp3lame","-q:a","2","-ar",str(Config.AUDIO_SR),final], 120)
         else:
-            run_cmd(["ffmpeg","-y","-i",vsfx,"-af","loudnorm=I=-14:TP=-1.5:LRA=11","-c:a","libmp3lame","-q:a","2","-ar",str(Config.AUDIO_SR),final], 120)
+            run_cmd(["ffmpeg","-y","-i",vsfx,"-af","laf","loudnorm=I=-14:TP=-1.5:LRA=11","-c:a","libmp3lame","-q:a","2","-ar",str(Config.AUDIO_SR),final], 120)
         if not os.path.exists(final):
             shutil.copy(vsfx, final)
         return final
 
-      # =============================================================================
+# =============================================================================
 # ASSET AGENT (B-Roll + BG Music)
 # =============================================================================
 
@@ -1147,7 +1151,7 @@ class AssetAgent:
         try:
             r = requests.get(f"https://image.pollinations.ai/prompt/{quote_plus(p)}?width=1080&height=1920&nologo=true&seed={random.randint(1,9999)}", timeout=60)
             if r.status_code == 200:
-                with open(dest,"wb") as f: f.write(rr.content)
+                with open(dest,"wb") as f: f.write(r.content)
                 return os.path.exists(dest) and os.path.getsize(dest) > 10240
             return False
         except Exception as e:
@@ -1289,7 +1293,7 @@ class VideoRenderer:
         except Exception as e:
             print(f"Thumb error: {e}"); return None
 
-  # =============================================================================
+# =============================================================================
 # TELEGRAM DELIVERY
 # =============================================================================
 
@@ -1299,5 +1303,95 @@ class TelegramAgent:
         self.cid = Config.TELEGRAM_CHAT_ID
         self.url = f"https://api.telegram.org/bot{self.tok}"
 
-    def send(self, video: str, script:
-             
+    def send(self, video: str, script: VideoScript, thumb: Optional[str] = None) -> bool:
+        """Send video and thumbnail to Telegram channel."""
+        try:
+            caption = f"{script.seo_title}\n\n{script.description}\n\n{' '.join(script.hashtags[:5])}"
+            with open(video, "rb") as vf:
+                files = {"video": vf}
+                data = {
+                    "chat_id": self.cid,
+                    "caption": caption[:1024],
+                    "supports_streaming": "true"
+                }
+                r = requests.post(f"{self.url}/sendVideo", data=data, files=files, timeout=120)
+                r.raise_for_status()
+                print("Telegram: Video sent successfully")
+
+            if thumb and os.path.exists(thumb):
+                with open(thumb, "rb") as tf:
+                    files = {"photo": tf}
+                    data = {"chat_id": self.cid, "caption": f"Thumbnail: {script.seo_title}"}
+                    r = requests.post(f"{self.url}/sendPhoto", data=data, files=files, timeout=60)
+                    if r.status_code == 200:
+                        print("Telegram: Thumbnail sent")
+
+            return True
+        except Exception as e:
+            print(f"Telegram error: {e}")
+            return False
+
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
+def main():
+    """Orchestrate the full AjeebOology Shorts pipeline."""
+    ensure_dirs()
+    print("=" * 60)
+    print("AjeebOology Shorts - Cinematic Automation Agent")
+    print("=" * 60)
+
+    cat = Config.CATEGORY_OVERRIDE or random.choice(["psychology", "space", "weird_facts"])
+    print(f"Category: {cat}")
+
+    research = ResearchAgent().research(cat)
+    print(f"Research topic: {research.get('topic', cat)}")
+
+    script = ScriptAgent().generate(research)
+    print(f"Title: {script.title}")
+    print(f"SEO Title: {script.seo_title}")
+    for i, seg in enumerate(script.segments):
+        print(f"  [{seg.seg_type}] {seg.text[:60]}...")
+
+    voice = VoiceAgent()
+    audio_segs = voice.generate(script)
+    print(f"Audio: {len(audio_segs)} segments, total duration: {script.total_dur:.2f}s")
+
+    assets = AssetAgent()
+    broll_paths = []
+    for i, seg in enumerate(script.segments):
+        prompt = seg.broll_prompt if seg.broll_prompt else f"{script.category} {seg.seg_type}"
+        bp = assets.fetch_broll(prompt, i)
+        broll_paths.append(bp)
+        print(f"  B-roll {i}: {bp or 'None'}")
+
+    bg = assets.fetch_bg()
+
+    renderer = VideoRenderer()
+    tokens = WordTimeline.build(audio_segs)
+    sfx_events = renderer._plan_sfx(tokens, script.total_dur)
+    final_audio = voice.mix(audio_segs, bg, sfx_events)
+    print(f"Final audio: {final_audio}")
+
+    video_path, peak_frame = renderer.render(script, audio_segs, broll_paths, final_audio)
+
+    thumb_path = renderer.generate_thumbnail(script, peak_frame)
+    if thumb_path:
+        print(f"Thumbnail: {thumb_path}")
+
+    if Config.TELEGRAM_TOKEN and Config.TELEGRAM_CHAT_ID:
+        TelegramAgent().send(video_path, script, thumb_path)
+
+    print("=" * 60)
+    print("DONE! All assets generated.")
+    print(f"Video: {video_path}")
+    if thumb_path:
+        print(f"Thumbnail: {thumb_path}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
+                                              
