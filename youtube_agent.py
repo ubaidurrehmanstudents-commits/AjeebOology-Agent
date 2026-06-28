@@ -1083,7 +1083,7 @@ class VoiceAgent:
     def mix(self, segs: List[AudioSeg], bg: Optional[str], sfx_events: List[Tuple[float,str]]) -> str:
         clist = str(Config.AUDIO / "concat.txt")
         with open(clist,"w") as f:
-            for s in segs: f.write(f"file '{s.path}'\n")
+             for s in segs: f.write(f"file '{s.path}'\n"
         vcat = str(Config.AUDIO / "voice_cat.mp3")
         run_cmd(["ffmpeg","-y","-f","concat","-safe","0","-i",clist,"-c","copy",vcat], 60)
         vsfx = str(Config.AUDIO / "voice_sfx.mp3")
@@ -1094,7 +1094,7 @@ class VoiceAgent:
                   "[0:a][bg]amix=inputs=2:duration=first:weights=1 0.25[Mixed];[Mixed]loudnorm=I=-14:TP=-1.5:LRA=11[out]")
             run_cmd(["ffmpeg","-y","-i",vsfx,"-i",bg,"-filter_complex",fc,"-map","[out]","-c:a","libmp3lame","-q:a","2","-ar",str(Config.AUDIO_SR),final], 120)
         else:
-            run_cmd(["ffmpeg","-y","-i",vsfx,"-af","laf","loudnorm=I=-14:TP=-1.5:LRA=11","-c:a","libmp3lame","-q:a","2","-ar",str(Config.AUDIO_SR),final], 120)
+            run_cmd(["ffmpeg","-y","-i",vsfx,"-af","loudnorm=I=-14:TP=-1.5:LRA=11",...
         if not os.path.exists(final):
             shutil.copy(vsfx, final)
         return final
